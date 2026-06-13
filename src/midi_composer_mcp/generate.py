@@ -92,6 +92,74 @@ def random_rhythm(length: int = 8, density: float = 0.65,
     }
 
 
+def _bjorklund(pulses: int, steps: int) -> list[bool]:
+    """Even (Euclidean) distribution of `pulses` onsets across `steps`."""
+    if steps <= 0:
+        return []
+    if pulses <= 0:
+        return [False] * steps
+    if pulses >= steps:
+        return [True] * steps
+    pattern_groups = [[True] for _ in range(pulses)]
+    remainder_groups = [[False] for _ in range(steps - pulses)]
+    while len(remainder_groups) > 1:
+        count = min(len(pattern_groups), len(remainder_groups))
+        for i in range(count):
+            pattern_groups[i].extend(remainder_groups[i])
+        if len(pattern_groups) > len(remainder_groups):
+            new_remainder = pattern_groups[count:]
+            pattern_groups = pattern_groups[:count]
+        else:
+            new_remainder = remainder_groups[count:]
+        remainder_groups = new_remainder
+    result: list[bool] = []
+    for group in pattern_groups + remainder_groups:
+        result.extend(group)
+    return result
+
+
+def euclidean_rhythm(pulses: int, steps: int = 16, rotation: int = 0) -> dict:
+    """Build a Euclidean rhythm spreading `pulses` onsets as evenly as possible.
+
+    Euclidean rhythms underlie countless drum and bass patterns worldwide
+    (e.g. pulses=3, steps=8 is the Cuban tresillo 'O..o..o.'). The downbeat
+    onset is rendered as 'O' (strong), the rest as 'o' (weak), gaps as '.';
+    `rotation` shifts the whole pattern left. The pattern feeds the `rhythm`
+    argument of notes_to_midi / drums_to_midi, or any drum lane.
+    """
+    if not isinstance(pulses, int) or isinstance(pulses, bool) or pulses < 0:
+        raise ValueError(f"pulses must be a non-negative integer, got {pulses!r}")
+    if not isinstance(steps, int) or isinstance(steps, bool) or not 1 <= steps <= 256:
+        raise ValueError(f"steps must be an integer between 1 and 256, got {steps!r}")
+    if pulses > steps:
+        raise ValueError(f"pulses ({pulses}) cannot exceed steps ({steps})")
+    if not isinstance(rotation, int) or isinstance(rotation, bool):
+        raise ValueError(f"rotation must be an integer, got {rotation!r}")
+
+    onsets = _bjorklund(pulses, steps)
+    if rotation:
+        r = rotation % steps
+        onsets = onsets[r:] + onsets[:r]
+    first_onset = next((i for i, on in enumerate(onsets) if on), None)
+    chars = []
+    for i, on in enumerate(onsets):
+        if not on:
+            chars.append(RHYTHM_REST)
+        elif i == first_onset:
+            chars.append(RHYTHM_STRONG)
+        else:
+            chars.append(RHYTHM_WEAK)
+    pattern = "".join(chars)
+    return {
+        "pattern": pattern,
+        "pulses": pulses,
+        "steps": steps,
+        "rotation": rotation,
+        "legend": {"O": "strong beat", "o": "weak beat", ".": "pause"},
+        "onset_positions": [i for i, on in enumerate(onsets) if on],
+    }
+
+
 def parse_rhythm(pattern: str) -> str:
     """Validate a rhythm pattern string; whitespace is ignored."""
     if not isinstance(pattern, str):

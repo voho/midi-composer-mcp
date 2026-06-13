@@ -16,9 +16,13 @@ EXPECTED_TOOLS = {
     "degrees_to_chords",
     "random_notes",
     "random_rhythm",
+    "euclidean_rhythm",
     "notes_to_midi",
     "chords_to_midi",
+    "drums_to_midi",
     "song_to_midi",
+    "arrange_to_midi",
+    "midi_to_audio",
 }
 
 
@@ -47,7 +51,7 @@ def test_call_chain_scale_to_match(tmp_path):
     from midi_composer_mcp.scales import match_scales, scale_info
 
     chord = chord_info("m", "A")
-    scales = match_scales(chord["notes"])
+    scales = match_scales(chord["notes"], limit=1000)
     assert any(
         m["root"] == "A" and m["scale_type"] == "natural minor" for m in scales["matches"]
     )

@@ -1,4 +1,4 @@
-"""Chord database: chord types with intervals, generation and matching."""
+"""Chord database: chord types with intervals, descriptions, generation and matching."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ class ChordType:
     symbol: str  # canonical suffix appended to the root, "" for major
     degrees: tuple[tuple[str, int], ...]  # (degree label, semitones from root)
     aliases: tuple[str, ...] = ()
+    description: str = ""
 
     @property
     def intervals(self) -> tuple[int, ...]:
@@ -27,36 +28,88 @@ class ChordType:
 CHORDS: dict[str, ChordType] = {
     c.name: c
     for c in [
-        ChordType("major", "", (("1", 0), ("3", 4), ("5", 7)), ("maj", "M")),
-        ChordType("minor", "m", (("1", 0), ("b3", 3), ("5", 7)), ("min", "-")),
-        ChordType("diminished", "dim", (("1", 0), ("b3", 3), ("b5", 6)), ("°", "o")),
-        ChordType("augmented", "aug", (("1", 0), ("3", 4), ("#5", 8)), ("+",)),
-        ChordType("power chord", "5", (("1", 0), ("5", 7)), ("power",)),
-        ChordType("suspended 2", "sus2", (("1", 0), ("2", 2), ("5", 7))),
-        ChordType("suspended 4", "sus4", (("1", 0), ("4", 5), ("5", 7)), ("sus",)),
-        ChordType("major 6", "6", (("1", 0), ("3", 4), ("5", 7), ("6", 9)), ("maj6", "M6")),
-        ChordType("minor 6", "m6", (("1", 0), ("b3", 3), ("5", 7), ("6", 9)), ("min6",)),
-        ChordType("dominant 7", "7", (("1", 0), ("3", 4), ("5", 7), ("b7", 10)), ("dom7",)),
-        ChordType("major 7", "maj7", (("1", 0), ("3", 4), ("5", 7), ("7", 11)), ("M7", "ma7", "Δ", "Δ7")),
-        ChordType("minor 7", "m7", (("1", 0), ("b3", 3), ("5", 7), ("b7", 10)), ("min7", "-7")),
-        ChordType("minor major 7", "mMaj7", (("1", 0), ("b3", 3), ("5", 7), ("7", 11)), ("mM7", "minmaj7", "m(maj7)")),
-        ChordType("diminished 7", "dim7", (("1", 0), ("b3", 3), ("b5", 6), ("bb7", 9)), ("°7", "o7")),
-        ChordType("half-diminished", "m7b5", (("1", 0), ("b3", 3), ("b5", 6), ("b7", 10)), ("ø", "ø7", "min7b5", "m7(b5)", "half-diminished 7")),
-        ChordType("augmented 7", "7#5", (("1", 0), ("3", 4), ("#5", 8), ("b7", 10)), ("aug7", "+7")),
-        ChordType("augmented major 7", "maj7#5", (("1", 0), ("3", 4), ("#5", 8), ("7", 11)), ("augmaj7", "+M7")),
-        ChordType("dominant 7 flat 5", "7b5", (("1", 0), ("3", 4), ("b5", 6), ("b7", 10))),
-        ChordType("dominant 7 sus 4", "7sus4", (("1", 0), ("4", 5), ("5", 7), ("b7", 10))),
-        ChordType("add 9", "add9", (("1", 0), ("3", 4), ("5", 7), ("9", 14))),
-        ChordType("minor add 9", "madd9", (("1", 0), ("b3", 3), ("5", 7), ("9", 14)), ("m(add9)",)),
-        ChordType("six nine", "6/9", (("1", 0), ("3", 4), ("5", 7), ("6", 9), ("9", 14)), ("69", "6add9")),
-        ChordType("dominant 9", "9", (("1", 0), ("3", 4), ("5", 7), ("b7", 10), ("9", 14))),
-        ChordType("major 9", "maj9", (("1", 0), ("3", 4), ("5", 7), ("7", 11), ("9", 14)), ("M9",)),
-        ChordType("minor 9", "m9", (("1", 0), ("b3", 3), ("5", 7), ("b7", 10), ("9", 14)), ("min9",)),
-        ChordType("dominant 7 flat 9", "7b9", (("1", 0), ("3", 4), ("5", 7), ("b7", 10), ("b9", 13))),
-        ChordType("dominant 7 sharp 9", "7#9", (("1", 0), ("3", 4), ("5", 7), ("b7", 10), ("#9", 15)), ("hendrix",)),
-        ChordType("dominant 11", "11", (("1", 0), ("3", 4), ("5", 7), ("b7", 10), ("9", 14), ("11", 17))),
-        ChordType("minor 11", "m11", (("1", 0), ("b3", 3), ("5", 7), ("b7", 10), ("9", 14), ("11", 17)), ("min11",)),
-        ChordType("dominant 13", "13", (("1", 0), ("3", 4), ("5", 7), ("b7", 10), ("9", 14), ("13", 21))),
+        # --- triads -----------------------------------------------------
+        ChordType("major", "", (("1", 0), ("3", 4), ("5", 7)), ("maj", "M"),
+                  description="The bright, stable major triad: root, major 3rd, perfect 5th."),
+        ChordType("minor", "m", (("1", 0), ("b3", 3), ("5", 7)), ("min", "-"),
+                  description="The dark, sad minor triad: root, minor 3rd, perfect 5th."),
+        ChordType("diminished", "dim", (("1", 0), ("b3", 3), ("b5", 6)), ("°", "o"),
+                  description="A tense triad of stacked minor 3rds (minor 3rd plus flat 5th) that wants to resolve."),
+        ChordType("augmented", "aug", (("1", 0), ("3", 4), ("#5", 8)), ("+",),
+                  description="An unstable, symmetrical triad of stacked major 3rds (major 3rd plus sharp 5th); dreamlike."),
+        ChordType("power chord", "5", (("1", 0), ("5", 7)), ("power",),
+                  description="Just the root and 5th, no 3rd; neither major nor minor, the staple of rock and metal."),
+        ChordType("suspended 2", "sus2", (("1", 0), ("2", 2), ("5", 7)), (),
+                  description="A suspended triad replacing the 3rd with the 2nd; open and unresolved."),
+        ChordType("suspended 4", "sus4", (("1", 0), ("4", 5), ("5", 7)), ("sus",),
+                  description="A suspended triad replacing the 3rd with the 4th; tense, wanting to fall to the major 3rd."),
+        # --- sixth and seventh chords -----------------------------------
+        ChordType("major 6", "6", (("1", 0), ("3", 4), ("5", 7), ("6", 9)), ("maj6", "M6"),
+                  description="A major triad plus the 6th; sweet and nostalgic, common in jazz and swing."),
+        ChordType("minor 6", "m6", (("1", 0), ("b3", 3), ("5", 7), ("6", 9)), ("min6",),
+                  description="A minor triad plus a major 6th; bittersweet, a favorite in jazz and bossa nova."),
+        ChordType("dominant 7", "7", (("1", 0), ("3", 4), ("5", 7), ("b7", 10)), ("dom7",),
+                  description="A major triad plus a flat 7th; restless and bluesy, the engine of tension and release."),
+        ChordType("major 7", "maj7", (("1", 0), ("3", 4), ("5", 7), ("7", 11)), ("M7", "ma7", "Δ", "Δ7"),
+                  description="A major triad plus a major 7th; lush, warm and dreamy."),
+        ChordType("minor 7", "m7", (("1", 0), ("b3", 3), ("5", 7), ("b7", 10)), ("min7", "-7"),
+                  description="A minor triad plus a flat 7th; smooth and mellow, the workhorse of jazz and soul."),
+        ChordType("minor major 7", "mMaj7", (("1", 0), ("b3", 3), ("5", 7), ("7", 11)), ("mM7", "minmaj7", "m(maj7)"),
+                  description="A minor triad with a major 7th; haunting and noir, famous from spy and horror themes."),
+        ChordType("diminished 7", "dim7", (("1", 0), ("b3", 3), ("b5", 6), ("bb7", 9)), ("°7", "o7"),
+                  description="Four stacked minor 3rds; fully symmetrical, maximally tense and endlessly modulating."),
+        ChordType("half-diminished", "m7b5", (("1", 0), ("b3", 3), ("b5", 6), ("b7", 10)),
+                  ("ø", "ø7", "min7b5", "m7(b5)", "half-diminished 7"),
+                  description="A diminished triad plus a flat 7th; the classic ii of a minor key, darker than m7 but softer than dim7."),
+        ChordType("augmented 7", "7#5", (("1", 0), ("3", 4), ("#5", 8), ("b7", 10)), ("aug7", "+7"),
+                  description="A dominant 7th with a raised 5th; an altered dominant that pulls hard toward resolution."),
+        ChordType("augmented major 7", "maj7#5", (("1", 0), ("3", 4), ("#5", 8), ("7", 11)), ("augmaj7", "+M7"),
+                  description="A major 7th with a raised 5th; shimmering and unstable."),
+        ChordType("dominant 7 flat 5", "7b5", (("1", 0), ("3", 4), ("b5", 6), ("b7", 10)), (),
+                  description="A dominant 7th with a lowered 5th; whole-tone flavored and tense."),
+        ChordType("dominant 7 sus 4", "7sus4", (("1", 0), ("4", 5), ("5", 7), ("b7", 10)), (),
+                  description="A dominant 7th with a suspended 4th instead of the 3rd; a soulful, delayed resolution."),
+        ChordType("dominant 7 sus 2", "7sus2", (("1", 0), ("2", 2), ("5", 7), ("b7", 10)), (),
+                  description="A dominant 7th with the 2nd in place of the 3rd; airy and open."),
+        # --- added-tone chords ------------------------------------------
+        ChordType("add 9", "add9", (("1", 0), ("3", 4), ("5", 7), ("9", 14)), (),
+                  description="A major triad with an added 9th and no 7th; bright and colorful."),
+        ChordType("minor add 9", "madd9", (("1", 0), ("b3", 3), ("5", 7), ("9", 14)), ("m(add9)",),
+                  description="A minor triad with an added 9th; wistful and modern."),
+        ChordType("add 4", "add4", (("1", 0), ("3", 4), ("4", 5), ("5", 7)), ("add11",),
+                  description="A major triad with an added 4th; lush and gently clashing, unlike sus4 which omits the 3rd."),
+        ChordType("six nine", "6/9", (("1", 0), ("3", 4), ("5", 7), ("6", 9), ("9", 14)), ("69", "6add9"),
+                  description="A major 6th chord with an added 9th; a rich, stable jazz ending chord."),
+        ChordType("minor six nine", "m6/9", (("1", 0), ("b3", 3), ("5", 7), ("6", 9), ("9", 14)), ("m69",),
+                  description="A minor 6th with an added 9th; smooth and sophisticated."),
+        # --- ninth chords -----------------------------------------------
+        ChordType("dominant 9", "9", (("1", 0), ("3", 4), ("5", 7), ("b7", 10), ("9", 14)), (),
+                  description="A dominant 7th extended with the 9th; funky and full."),
+        ChordType("major 9", "maj9", (("1", 0), ("3", 4), ("5", 7), ("7", 11), ("9", 14)), ("M9",),
+                  description="A major 7th extended with the 9th; rich, open and lush."),
+        ChordType("minor 9", "m9", (("1", 0), ("b3", 3), ("5", 7), ("b7", 10), ("9", 14)), ("min9",),
+                  description="A minor 7th extended with the 9th; warm and soulful."),
+        ChordType("dominant 7 flat 9", "7b9", (("1", 0), ("3", 4), ("5", 7), ("b7", 10), ("b9", 13)), (),
+                  description="A dominant 7th with a flat 9th; dark and tense, resolving strongly to minor."),
+        ChordType("dominant 7 sharp 9", "7#9", (("1", 0), ("3", 4), ("5", 7), ("b7", 10), ("#9", 15)), ("hendrix",),
+                  description="A dominant 7th with a sharp 9th; the gritty 'Hendrix chord' clashing major and minor 3rds."),
+        # --- sharp-eleven (lydian) chords -------------------------------
+        ChordType("dominant 7 sharp 11", "7#11", (("1", 0), ("3", 4), ("5", 7), ("b7", 10), ("#11", 18)), (),
+                  description="A dominant 7th with a raised 11th; lydian-dominant color, bright and edgy."),
+        ChordType("major 7 sharp 11", "maj7#11", (("1", 0), ("3", 4), ("5", 7), ("7", 11), ("#11", 18)),
+                  ("maj7#4", "lydian chord"),
+                  description="A major 7th with a raised 11th; the floating, modern 'lydian' chord."),
+        # --- eleventh and thirteenth chords -----------------------------
+        ChordType("dominant 11", "11", (("1", 0), ("3", 4), ("5", 7), ("b7", 10), ("9", 14), ("11", 17)), (),
+                  description="A dominant 9th extended with the 11th; usually voiced without the 3rd, giving a suspended feel."),
+        ChordType("minor 11", "m11", (("1", 0), ("b3", 3), ("5", 7), ("b7", 10), ("9", 14), ("11", 17)), ("min11",),
+                  description="A minor 9th extended with the 11th; spacious and modal, a quintessential modern-jazz minor sound."),
+        ChordType("dominant 13", "13", (("1", 0), ("3", 4), ("5", 7), ("b7", 10), ("9", 14), ("13", 21)), (),
+                  description="A dominant chord extended to the 13th; full and brassy, the lush dominant of big-band jazz."),
+        ChordType("major 13", "maj13", (("1", 0), ("3", 4), ("5", 7), ("7", 11), ("9", 14), ("13", 21)), ("M13",),
+                  description="A major 7th extended to the 13th; maximally lush and resolved."),
+        ChordType("minor 13", "m13", (("1", 0), ("b3", 3), ("5", 7), ("b7", 10), ("9", 14), ("13", 21)), ("min13",),
+                  description="A minor 7th extended to the 13th; deep, warm and modal."),
     ]
 }
 
@@ -162,6 +215,7 @@ def chord_info(chord_type: str, root: str | None = None) -> dict:
     chord = resolve_chord_type(chord_type)
     result: dict = {
         "chord_type": chord.name,
+        "description": chord.description,
         "symbol_suffix": chord.symbol,
         "aliases": list(chord.aliases),
         "intervals": list(chord.intervals),
@@ -186,6 +240,7 @@ def list_chords() -> dict:
         "chords": [
             {
                 "chord_type": c.name,
+                "description": c.description,
                 "symbol_suffix": c.symbol,
                 "example": f"C{c.symbol}",
                 "aliases": list(c.aliases),

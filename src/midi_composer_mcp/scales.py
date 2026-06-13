@@ -1,4 +1,4 @@
-"""Scale database: scale types with intervals, generation and matching."""
+"""Scale database: scale types with intervals, descriptions, generation and matching."""
 
 from __future__ import annotations
 
@@ -23,34 +23,111 @@ class ScaleType:
     intervals: tuple[int, ...]
     aliases: tuple[str, ...] = ()
     matchable: bool = True  # chromatic matches everything, so it is excluded
+    description: str = ""
 
 
 SCALES: dict[str, ScaleType] = {
     s.name: s
     for s in [
-        ScaleType("major", (0, 2, 4, 5, 7, 9, 11), ("ionian", "maj")),
-        ScaleType("natural minor", (0, 2, 3, 5, 7, 8, 10), ("minor", "min", "aeolian")),
-        ScaleType("harmonic minor", (0, 2, 3, 5, 7, 8, 11)),
-        ScaleType("melodic minor", (0, 2, 3, 5, 7, 9, 11), ("jazz minor", "melodic minor ascending")),
-        ScaleType("dorian", (0, 2, 3, 5, 7, 9, 10)),
-        ScaleType("phrygian", (0, 1, 3, 5, 7, 8, 10)),
-        ScaleType("lydian", (0, 2, 4, 6, 7, 9, 11)),
-        ScaleType("mixolydian", (0, 2, 4, 5, 7, 9, 10), ("dominant scale",)),
-        ScaleType("locrian", (0, 1, 3, 5, 6, 8, 10)),
-        ScaleType("major pentatonic", (0, 2, 4, 7, 9), ("pentatonic", "pentatonic major")),
-        ScaleType("minor pentatonic", (0, 3, 5, 7, 10), ("pentatonic minor",)),
-        ScaleType("blues", (0, 3, 5, 6, 7, 10), ("minor blues", "blues minor")),
-        ScaleType("major blues", (0, 2, 3, 4, 7, 9), ("blues major",)),
-        ScaleType("whole tone", (0, 2, 4, 6, 8, 10), ("wholetone",)),
-        ScaleType("diminished whole-half", (0, 2, 3, 5, 6, 8, 9, 11), ("diminished", "octatonic", "whole-half diminished")),
-        ScaleType("diminished half-whole", (0, 1, 3, 4, 6, 7, 9, 10), ("dominant diminished", "half-whole diminished")),
-        ScaleType("altered", (0, 1, 3, 4, 6, 8, 10), ("super locrian", "altered dominant")),
-        ScaleType("phrygian dominant", (0, 1, 4, 5, 7, 8, 10), ("spanish phrygian", "freygish")),
-        ScaleType("double harmonic", (0, 1, 4, 5, 7, 8, 11), ("byzantine", "arabic")),
-        ScaleType("hungarian minor", (0, 2, 3, 6, 7, 8, 11), ("gypsy minor",)),
-        ScaleType("harmonic major", (0, 2, 4, 5, 7, 8, 11)),
-        ScaleType("bebop dominant", (0, 2, 4, 5, 7, 9, 10, 11), ("bebop",)),
-        ScaleType("chromatic", tuple(range(12)), (), False),
+        # --- major scale and its modes ----------------------------------
+        ScaleType("major", (0, 2, 4, 5, 7, 9, 11), ("ionian", "maj"),
+                  description="The standard major scale (do-re-mi); bright, stable, and the bedrock of Western tonal music."),
+        ScaleType("dorian", (0, 2, 3, 5, 7, 9, 10), (),
+                  description="A minor mode with a bright raised 6th; the hopeful, jazzy minor of folk and modal jazz."),
+        ScaleType("phrygian", (0, 1, 3, 5, 7, 8, 10), (),
+                  description="A minor mode with a flat 2nd; dark and tense, with a Spanish/flamenco undercurrent."),
+        ScaleType("lydian", (0, 2, 4, 6, 7, 9, 11), (),
+                  description="A major mode with a raised 4th; dreamy, floating and luminous, a film-score favorite."),
+        ScaleType("mixolydian", (0, 2, 4, 5, 7, 9, 10), ("dominant scale",),
+                  description="A major mode with a flat 7th; the dominant-7th sound of blues, rock, funk and Celtic music."),
+        ScaleType("natural minor", (0, 2, 3, 5, 7, 8, 10), ("minor", "min", "aeolian"),
+                  description="The standard minor scale and relative minor of the major scale; wistful and melancholic."),
+        ScaleType("locrian", (0, 1, 3, 5, 6, 8, 10), (),
+                  description="A diminished mode with flat 2nd and flat 5th; unstable and rarely a tonic, home of the m7b5 chord."),
+        # --- minor variants ---------------------------------------------
+        ScaleType("harmonic minor", (0, 2, 3, 5, 7, 8, 11), (),
+                  description="Natural minor with a raised 7th, adding a strong leading tone and a dramatic augmented-2nd step."),
+        ScaleType("melodic minor", (0, 2, 3, 5, 7, 9, 11), ("jazz minor", "melodic minor ascending"),
+                  description="Natural minor with raised 6th and 7th; smooths melodies to the tonic and is the parent scale of much jazz."),
+        # --- modes of melodic minor -------------------------------------
+        ScaleType("dorian b2", (0, 1, 3, 5, 7, 9, 10), ("phrygian #6", "assyrian"),
+                  description="The 2nd mode of melodic minor; dorian brightness over a phrygian flat-2nd, restless and exotic."),
+        ScaleType("lydian augmented", (0, 2, 4, 6, 8, 9, 11), (),
+                  description="The 3rd mode of melodic minor; a lydian scale with a raised 5th, shimmering and unresolved."),
+        ScaleType("lydian dominant", (0, 2, 4, 6, 7, 9, 10), ("lydian b7", "mixolydian #4", "overtone", "acoustic"),
+                  description="The 4th mode of melodic minor: a dominant scale with a raised 4th, matching the natural overtone series."),
+        ScaleType("mixolydian b6", (0, 2, 4, 5, 7, 8, 10), ("melodic major", "hindu"),
+                  description="Mixolydian with a flat 6th; a dominant scale that leans melancholy, good moving to minor."),
+        ScaleType("locrian #2", (0, 2, 3, 5, 6, 8, 10), ("half-diminished scale", "aeolian b5"),
+                  description="The 6th mode of melodic minor; locrian with a natural 2nd, the smoothest scale for m7b5 chords."),
+        ScaleType("altered", (0, 1, 3, 4, 6, 8, 10), ("super locrian", "altered dominant", "diminished whole tone"),
+                  description="The 7th mode of melodic minor; packed with every altered tension (b9 #9 #11 b13) for maximally tense dominants."),
+        # --- harmonic major and harmonic minor relatives ----------------
+        ScaleType("harmonic major", (0, 2, 4, 5, 7, 8, 11), (),
+                  description="Major with a flat 6th; blends major brightness with a touch of minor shadow and an augmented-2nd step."),
+        ScaleType("phrygian dominant", (0, 1, 4, 5, 7, 8, 10), ("spanish phrygian", "freygish", "ahava raba"),
+                  description="The 5th mode of harmonic minor; a major 3rd over a phrygian b2, the sound of flamenco and Klezmer."),
+        ScaleType("double harmonic", (0, 1, 4, 5, 7, 8, 11), ("byzantine", "arabic", "gypsy major"),
+                  description="Two augmented 2nds give this scale a vivid Middle-Eastern/Byzantine character."),
+        ScaleType("hungarian minor", (0, 2, 3, 6, 7, 8, 11), ("gypsy minor",),
+                  description="Harmonic minor with a raised 4th; the gypsy-minor scale with two dramatic augmented 2nds."),
+        ScaleType("hungarian major", (0, 3, 4, 6, 7, 9, 10), (),
+                  description="A bright, fiery scale opening on a raised 2nd and carrying a flat 7th; rooted in Hungarian folk music."),
+        ScaleType("neapolitan minor", (0, 1, 3, 5, 7, 8, 11), (),
+                  description="Harmonic minor with a flat 2nd; somber and exotic, resolving with a strong leading tone."),
+        ScaleType("neapolitan major", (0, 1, 3, 5, 7, 9, 11), (),
+                  description="Melodic minor with a flat 2nd; smooth and slightly unusual, major on top of a phrygian start."),
+        ScaleType("persian", (0, 1, 4, 5, 6, 8, 11), (),
+                  description="A flat-2nd, flat-5th scale with two augmented 2nds; intensely ornamental and Middle-Eastern."),
+        ScaleType("ukrainian dorian", (0, 2, 3, 6, 7, 9, 10), ("romanian minor", "altered dorian"),
+                  description="Dorian with a raised 4th; plaintive and folk-like across Eastern European and Klezmer music."),
+        ScaleType("enigmatic", (0, 1, 4, 6, 8, 10, 11), (),
+                  description="Verdi's invented scale mixing whole tones with leading tones; strange, bright and unresolved."),
+        # --- pentatonics and blues --------------------------------------
+        ScaleType("major pentatonic", (0, 2, 4, 7, 9), ("pentatonic", "pentatonic major"),
+                  description="A five-note major scale with no semitones; open, singable and consonant in any combination."),
+        ScaleType("minor pentatonic", (0, 3, 5, 7, 10), ("pentatonic minor",),
+                  description="The five-note minor scale at the core of blues, rock and pop soloing."),
+        ScaleType("blues", (0, 3, 5, 6, 7, 10), ("minor blues", "blues minor"),
+                  description="Minor pentatonic plus a chromatic 'blue note' (b5); the gritty, vocal sound of the blues."),
+        ScaleType("major blues", (0, 2, 3, 4, 7, 9), ("blues major",),
+                  description="Major pentatonic with an added b3 blue note; bright yet bluesy, common in country and rock."),
+        ScaleType("egyptian", (0, 2, 5, 7, 10), ("suspended pentatonic",),
+                  description="A suspended-sounding mode of the major pentatonic built on stacked 4ths and 5ths; open and unresolved."),
+        # --- symmetric scales -------------------------------------------
+        ScaleType("whole tone", (0, 2, 4, 6, 8, 10), ("wholetone",),
+                  description="Six notes a whole step apart; dreamlike and rootless with no leading tone, beloved by Debussy."),
+        ScaleType("augmented", (0, 3, 4, 7, 8, 11), ("symmetric augmented",),
+                  description="A six-note symmetric scale alternating minor 3rds and half steps; stark and built from two augmented triads."),
+        ScaleType("diminished whole-half", (0, 2, 3, 5, 6, 8, 9, 11), ("diminished", "octatonic", "whole-half diminished"),
+                  description="An eight-note symmetric scale alternating whole and half steps; played over diminished-7th chords."),
+        ScaleType("diminished half-whole", (0, 1, 3, 4, 6, 7, 9, 10), ("dominant diminished", "half-whole diminished"),
+                  description="The octatonic scale starting with a half step; the go-to choice over dominant 7b9/#9 chords."),
+        ScaleType("prometheus", (0, 2, 4, 6, 9, 10), ("mystic",),
+                  description="Scriabin's six-note 'mystic' scale built from the mystic chord; hovering, ambiguous and tense."),
+        # --- bebop ------------------------------------------------------
+        ScaleType("bebop dominant", (0, 2, 4, 5, 7, 9, 10, 11), ("bebop",),
+                  description="Mixolydian plus a passing major 7th; the extra note keeps chord tones on the beat in fast bebop lines."),
+        ScaleType("bebop major", (0, 2, 4, 5, 7, 8, 9, 11), (),
+                  description="The major scale with a passing #5; aligns chord tones to strong beats over major harmony."),
+        ScaleType("spanish 8-tone", (0, 1, 3, 4, 5, 6, 8, 10), ("spanish gypsy", "jewish 8-tone"),
+                  description="An eight-note flamenco scale extending phrygian dominant with chromatic passing tones for both 3rds."),
+        # --- Japanese and world pentatonics -----------------------------
+        ScaleType("hirajoshi", (0, 2, 3, 7, 8), (),
+                  description="A Japanese pentatonic with two semitone steps; sparse, dark and contemplative on koto and shakuhachi."),
+        ScaleType("in sen", (0, 1, 5, 7, 10), ("in", "insen"),
+                  description="A dark Japanese pentatonic built on the flat 2nd; haunting and traditional."),
+        ScaleType("iwato", (0, 1, 5, 6, 10), (),
+                  description="A somber Japanese pentatonic with two tritone-flavored tensions; tense and shadowy."),
+        ScaleType("kumoi", (0, 2, 3, 7, 9), ("kumoijoshi",),
+                  description="A Japanese pentatonic with a bright opening and minor color; delicate and evocative."),
+        ScaleType("yo", (0, 2, 5, 7, 9), (),
+                  description="A bright, semitone-free Japanese pentatonic used in folk songs and Buddhist chant."),
+        ScaleType("balinese pelog", (0, 1, 3, 7, 8), ("pelog",),
+                  description="A five-note scale approximating Indonesian gamelan pelog tuning in 12-tone equal temperament; exotic and uneven."),
+        # --- complete chromatic -----------------------------------------
+        ScaleType("chromatic", tuple(range(12)), (), False,
+                  description="All twelve semitones; not a tonal scale but the complete palette for passing tones and atonal writing."),
     ]
 }
 
@@ -117,6 +194,7 @@ def scale_info(scale_type: str, root: str | None = None) -> dict:
     scale = resolve_scale_type(scale_type)
     result: dict = {
         "scale_type": scale.name,
+        "description": scale.description,
         "aliases": list(scale.aliases),
         "intervals": list(scale.intervals),
         "degrees": degree_labels(scale.intervals),
@@ -139,6 +217,7 @@ def list_scales() -> dict:
         "scales": [
             {
                 "scale_type": s.name,
+                "description": s.description,
                 "aliases": list(s.aliases),
                 "intervals": list(s.intervals),
                 "degrees": degree_labels(s.intervals),

@@ -1,7 +1,8 @@
-"""Deterministic MIDI rendering: note sequences, rhythms and chords to .mid.
+"""Deterministic MIDI rendering: note sequences, rhythms, chords, drums and
+full multi-track arrangements to .mid.
 
 These renderers add no musical decisions of their own — they write exactly
-the notes, rhythm and chords they are given. Output files land in
+the notes, rhythm, chords and drum hits they are given. Output files land in
 ``MIDI_COMPOSER_OUTPUT_DIR`` (default ``./midi_output``) and are also
 returned base64-encoded.
 """
@@ -22,6 +23,21 @@ from .notes import LETTER_PCS, Note, parse_notes
 TICKS_PER_BEAT = 480
 DEFAULT_OUTPUT_DIR = "midi_output"
 OCTAVE_POLICIES = ("nearest", "ascending")
+DRUM_CHANNEL = 9  # General MIDI percussion channel (channel 10, 0-indexed)
+
+# General MIDI percussion key map (note numbers on the drum channel).
+GM_DRUMS: dict[str, int] = {
+    "kick": 36, "bass_drum": 36, "acoustic_bass_drum": 35, "kick2": 35,
+    "snare": 38, "acoustic_snare": 38, "electric_snare": 40,
+    "side_stick": 37, "rimshot": 37, "clap": 39, "hand_clap": 39,
+    "closed_hat": 42, "hat": 42, "hihat": 42, "closed_hihat": 42,
+    "pedal_hat": 44, "open_hat": 46, "open_hihat": 46,
+    "low_tom": 45, "mid_tom": 47, "high_tom": 50, "floor_tom": 43,
+    "crash": 49, "crash2": 57, "ride": 51, "ride_bell": 53, "splash": 55, "china": 52,
+    "tambourine": 54, "cowbell": 56, "vibraslap": 58, "clave": 75, "woodblock": 76,
+    "shaker": 82, "maracas": 70, "cabasa": 69, "triangle": 81,
+    "conga": 63, "bongo": 60, "timbale": 65, "agogo": 67, "guiro": 73, "whistle": 71,
+}
 
 
 # ---------------------------------------------------------------- validation
@@ -44,6 +60,27 @@ def _check_midi(note: Note) -> Note:
     if not 0 <= note.midi <= 127:
         raise ValueError(f"Note {note.name} is outside the MIDI range 0-127 (C-1 to G9)")
     return note
+
+
+def resolve_drum(name) -> tuple[int, str]:
+    """Resolve a drum lane name ('kick', 'snare', ...) or note number to MIDI."""
+    if isinstance(name, bool):
+        raise ValueError(f"Invalid drum: {name!r}")
+    if isinstance(name, int):
+        if not 0 <= name <= 127:
+            raise ValueError(f"Drum note number out of range 0-127: {name}")
+        return name, str(name)
+    if isinstance(name, str):
+        key = name.strip().lower().replace(" ", "_").replace("-", "_")
+        if key in GM_DRUMS:
+            return GM_DRUMS[key], key
+        if re.fullmatch(r"-?\d+", key):
+            return resolve_drum(int(key))
+        raise ValueError(
+            f"Unknown drum {name!r}. Use a General MIDI note number (0-127) or a name like: "
+            + ", ".join(sorted(set(GM_DRUMS)))
+        )
+    raise ValueError(f"Invalid drum: {name!r} (use a name or a note number)")
 
 
 # ----------------------------------------------------- octave assignment
@@ -111,13 +148,18 @@ def voice_chord(tones: list[Note], octave: int, bass: Note | None = None) -> lis
 
 # ----------------------------------------------------------- event building
 
+# An event is {"midi": int, "label": str, "start": float, "duration": float,
+#              "velocity": int} with beat-based start/duration.
+
 def _melody_events(notes: list[Note], rhythm: str | None, step_beats: float,
-                   velocity: int, accent_velocity: int, sustain: bool) -> tuple[list[dict], float]:
+                   velocity: int, accent_velocity: int, sustain: bool,
+                   start: float = 0.0) -> tuple[list[dict], float]:
     """Turn placed notes (+ optional rhythm pattern) into timed events."""
     events: list[dict] = []
     if rhythm is None:
         for i, note in enumerate(notes):
-            events.append({"note": note, "start": i * step_beats,
+            events.append({"midi": note.midi, "label": note.name,
+                           "start": start + i * step_beats,
                            "duration": step_beats, "velocity": velocity})
         return events, len(notes) * step_beats
 
@@ -131,8 +173,9 @@ def _melody_events(notes: list[Note], rhythm: str | None, step_beats: float,
         note = notes[index % len(notes)]
         index += 1
         events.append({
-            "note": note,
-            "start": step * step_beats,
+            "midi": note.midi,
+            "label": note.name,
+            "start": start + step * step_beats,
             "duration": step_beats,
             "velocity": accent_velocity if symbol == RHYTHM_STRONG else velocity,
         })
@@ -171,29 +214,63 @@ def _parse_chord_list(chords) -> list[dict]:
 
 
 def _chord_events(parsed_chords: list[dict], beats_per_chord: float, octave: int,
-                  arpeggiate: bool, velocity: int) -> tuple[list[dict], list[dict], float]:
+                  arpeggiate: bool, velocity: int,
+                  start: float = 0.0) -> tuple[list[dict], list[dict], float]:
     events: list[dict] = []
     resolved: list[dict] = []
     for i, chord in enumerate(parsed_chords):
         voiced = voice_chord(chord["tones"], octave, chord["bass"])
-        start = i * beats_per_chord
+        chord_start = start + i * beats_per_chord
         if arpeggiate:
             tone_beats = beats_per_chord / len(voiced)
             for k, note in enumerate(voiced):
-                events.append({"note": note, "start": start + k * tone_beats,
+                events.append({"midi": note.midi, "label": note.name,
+                               "start": chord_start + k * tone_beats,
                                "duration": tone_beats, "velocity": velocity})
         else:
             for note in voiced:
-                events.append({"note": note, "start": start,
+                events.append({"midi": note.midi, "label": note.name,
+                               "start": chord_start,
                                "duration": beats_per_chord, "velocity": velocity})
         resolved.append({
             "symbol": chord["symbol"] or " ".join(n.pitch_class_name for n in voiced),
             "notes": [n.name for n in voiced],
             "midi": [n.midi for n in voiced],
-            "start_beat": start,
+            "start_beat": chord_start,
             "duration_beats": beats_per_chord,
         })
     return events, resolved, len(parsed_chords) * beats_per_chord
+
+
+def _drum_events(lanes, step_beats: float, velocity: int, accent_velocity: int,
+                 start: float = 0.0) -> tuple[list[dict], list[dict], float]:
+    """Build drum events from {lane name: rhythm pattern} on the drum channel."""
+    if not isinstance(lanes, dict) or not lanes:
+        raise ValueError(
+            "drum `lanes` must be a non-empty mapping of drum name to rhythm pattern,"
+            " e.g. {'kick': 'O...O...', 'snare': '..O...O.', 'hat': 'oooooooo'}"
+        )
+    events: list[dict] = []
+    resolved: list[dict] = []
+    max_steps = 0
+    for name, pattern in lanes.items():
+        midi, label = resolve_drum(name)
+        pat = parse_rhythm(pattern)
+        max_steps = max(max_steps, len(pat))
+        hits = 0
+        for step, symbol in enumerate(pat):
+            if symbol == RHYTHM_REST:
+                continue
+            events.append({
+                "midi": midi,
+                "label": label,
+                "start": start + step * step_beats,
+                "duration": step_beats,
+                "velocity": accent_velocity if symbol == RHYTHM_STRONG else velocity,
+            })
+            hits += 1
+        resolved.append({"drum": label, "note": midi, "pattern": pat, "hits": hits})
+    return events, resolved, max_steps * step_beats
 
 
 # ------------------------------------------------------------- file writing
@@ -204,9 +281,8 @@ def _events_to_track(events: list[dict], channel: int, program: int,
     for e in events:
         on_tick = round(e["start"] * TICKS_PER_BEAT)
         off_tick = max(on_tick + 1, round((e["start"] + e["duration"]) * TICKS_PER_BEAT))
-        midi = e["note"].midi
-        timed.append((on_tick, 1, Message("note_on", note=midi, velocity=e["velocity"], channel=channel)))
-        timed.append((off_tick, 0, Message("note_off", note=midi, velocity=0, channel=channel)))
+        timed.append((on_tick, 1, Message("note_on", note=e["midi"], velocity=e["velocity"], channel=channel)))
+        timed.append((off_tick, 0, Message("note_off", note=e["midi"], velocity=0, channel=channel)))
     timed.sort(key=lambda t: (t[0], t[1]))
 
     track = MidiTrack()
@@ -267,8 +343,8 @@ def _write_file(mid: MidiFile, file_name: str | None, output_dir: str | None,
 def _serialize_events(events: list[dict]) -> list[dict]:
     return [
         {
-            "note": e["note"].name,
-            "midi": e["note"].midi,
+            "note": e["label"],
+            "midi": e["midi"],
             "start_beat": e["start"],
             "duration_beats": e["duration"],
             "velocity": e["velocity"],
@@ -335,6 +411,24 @@ def render_chords(chords, beats_per_chord: float = 4.0, tempo: int = 120,
     return result
 
 
+def render_drums(lanes, step_beats: float = 0.5, tempo: int = 120, velocity: int = 100,
+                 accent_velocity: int = 120, file_name: str | None = None,
+                 output_dir: str | None = None) -> dict:
+    """Render a drum pattern (named lanes of rhythm strings) to a MIDI file."""
+    _check_range("tempo", tempo, 10, 400, integer=True)
+    _check_range("step_beats", step_beats, 0.0625, 16)
+    _check_range("velocity", velocity, 1, 127, integer=True)
+    _check_range("accent_velocity", accent_velocity, 1, 127, integer=True)
+
+    events, resolved, total_beats = _drum_events(lanes, step_beats, velocity, accent_velocity)
+    mid = _build_file([{"events": events, "channel": DRUM_CHANNEL, "program": 0, "name": "drums"}], tempo)
+    result = _write_file(mid, file_name, output_dir, "drums")
+    result.update(_common_meta(tempo, total_beats))
+    result["hit_count"] = len(events)
+    result["lanes"] = resolved
+    return result
+
+
 def render_song(melody_notes, chords, melody_rhythm: str | None = None,
                 step_beats: float = 0.5, beats_per_chord: float = 4.0,
                 tempo: int = 120, melody_octave: int = 5, chord_octave: int = 4,
@@ -377,4 +471,125 @@ def render_song(melody_notes, chords, melody_rhythm: str | None = None,
     result["chord_beats"] = chord_beats
     result["melody_events"] = _serialize_events(melody_events)
     result["chords"] = resolved
+    return result
+
+
+# ------------------------------------------------------ multi-track arrange
+
+def _channel_allocator():
+    """Yield channels 0,1,...,8,10,...,15 (skipping the drum channel)."""
+    for ch in range(16):
+        if ch != DRUM_CHANNEL:
+            yield ch
+
+
+def _build_track(track: dict, index: int, step_beats: float, beats_per_chord: float,
+                 channels) -> dict:
+    if not isinstance(track, dict):
+        raise ValueError(f"track {index} must be an object, got {type(track).__name__}")
+    ttype = track.get("type")
+    if ttype not in ("notes", "chords", "drums"):
+        raise ValueError(
+            f"track {index} has invalid type {ttype!r}; use 'notes', 'chords' or 'drums'"
+        )
+    name = track.get("name") or ttype
+    start = track.get("start_beat", 0.0)
+    _check_range(f"track {index} start_beat", start, 0, 100000)
+    program = track.get("program", 0)
+    _check_range(f"track {index} program", program, 0, 127, integer=True)
+
+    explicit_channel = track.get("channel")
+
+    if ttype == "drums":
+        channel = DRUM_CHANNEL if explicit_channel is None else explicit_channel
+        velocity = track.get("velocity", 100)
+        accent = track.get("accent_velocity", 120)
+        t_step = track.get("step_beats", step_beats)
+        _check_range(f"track {index} velocity", velocity, 1, 127, integer=True)
+        _check_range(f"track {index} accent_velocity", accent, 1, 127, integer=True)
+        _check_range(f"track {index} step_beats", t_step, 0.0625, 16)
+        events, resolved, length = _drum_events(track.get("lanes"), t_step, velocity, accent, start)
+        detail = {"lanes": resolved}
+    elif ttype == "notes":
+        channel = next(channels) if explicit_channel is None else explicit_channel
+        velocity = track.get("velocity", 90)
+        accent = track.get("accent_velocity", 110)
+        t_step = track.get("step_beats", step_beats)
+        octave = track.get("octave", 4)
+        policy = track.get("octave_policy", "nearest")
+        _check_range(f"track {index} velocity", velocity, 1, 127, integer=True)
+        _check_range(f"track {index} accent_velocity", accent, 1, 127, integer=True)
+        _check_range(f"track {index} step_beats", t_step, 0.0625, 16)
+        _check_range(f"track {index} octave", octave, -1, 9, integer=True)
+        placed = assign_octaves(parse_notes(track.get("notes")), octave, policy)
+        events, length = _melody_events(placed, track.get("rhythm"), t_step, velocity,
+                                        accent, track.get("sustain", False), start)
+        detail = {"events": _serialize_events(events)}
+    else:  # chords
+        channel = next(channels) if explicit_channel is None else explicit_channel
+        velocity = track.get("velocity", 80)
+        octave = track.get("octave", 4)
+        bpc = track.get("beats_per_chord", beats_per_chord)
+        _check_range(f"track {index} velocity", velocity, 1, 127, integer=True)
+        _check_range(f"track {index} octave", octave, -1, 9, integer=True)
+        _check_range(f"track {index} beats_per_chord", bpc, 0.25, 64)
+        events, resolved, length = _chord_events(_parse_chord_list(track.get("chords")), bpc,
+                                                 octave, track.get("arpeggiate", False),
+                                                 velocity, start)
+        detail = {"chords": resolved}
+
+    if explicit_channel is not None:
+        _check_range(f"track {index} channel", channel, 0, 15, integer=True)
+
+    summary = {
+        "name": name,
+        "type": ttype,
+        "channel": channel,
+        "program": program,
+        "start_beat": start,
+        "length_beats": length,
+        "end_beat": start + length,
+        "event_count": len(events),
+        **detail,
+    }
+    return {"events": events, "channel": channel, "program": program,
+            "name": name, "end_beat": start + length, "summary": summary}
+
+
+def render_arrangement(tracks, tempo: int = 120, file_name: str | None = None,
+                       output_dir: str | None = None, step_beats: float = 0.5,
+                       beats_per_chord: float = 4.0) -> dict:
+    """Render any number of named tracks into one multi-track MIDI file.
+
+    `tracks` is a list of track objects, each `{"type": "notes"|"chords"|"drums", ...}`:
+
+    - notes:  {"type": "notes", "notes": [...], "rhythm": "O.o.", "octave": 3,
+               "program": 33, "octave_policy": "nearest", "sustain": false}
+    - chords: {"type": "chords", "chords": ["Am","F","C","G"], "beats_per_chord": 4,
+               "octave": 4, "arpeggiate": false, "program": 0}
+    - drums:  {"type": "drums", "lanes": {"kick": "O...", "snare": "..O.", "hat": "oooo"}}
+
+    Shared per-track options: `name`, `velocity`, `start_beat` (beat offset),
+    `step_beats`, `channel` (auto-assigned, drums forced to channel 10).
+    """
+    if not isinstance(tracks, (list, tuple)) or not tracks:
+        raise ValueError("tracks must be a non-empty list of track objects")
+    _check_range("tempo", tempo, 10, 400, integer=True)
+    _check_range("step_beats", step_beats, 0.0625, 16)
+    _check_range("beats_per_chord", beats_per_chord, 0.25, 64)
+
+    channels = _channel_allocator()
+    built = [_build_track(t, i, step_beats, beats_per_chord, channels)
+             for i, t in enumerate(tracks)]
+
+    mid = _build_file(
+        [{"events": b["events"], "channel": b["channel"],
+          "program": b["program"], "name": b["name"]} for b in built],
+        tempo,
+    )
+    result = _write_file(mid, file_name, output_dir, "arrangement")
+    total_beats = max((b["end_beat"] for b in built), default=0.0)
+    result.update(_common_meta(tempo, total_beats))
+    result["track_count"] = len(built)
+    result["tracks"] = [b["summary"] for b in built]
     return result
