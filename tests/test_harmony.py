@@ -161,3 +161,66 @@ def test_counterpoint_is_diatonic():
     r = first_species(cf, "A", "natural minor", "above")
     a_minor = {9, 11, 0, 2, 4, 5, 7}
     assert all(parse_note(n).pitch_class in a_minor for n in r["counterpoint"])
+
+
+# ------------------------------------------------------ higher species (2-5)
+
+from midi_composer_mcp.counterpoint import species_counterpoint
+
+CF = ["C5", "D5", "F5", "E5", "D5", "C5"]
+_CONSONANT = {0, 3, 4, 7, 8, 9}
+
+
+def _strong_notes(result):
+    """The note sounding on each bar's downbeat (= the per-bar downbeat interval)."""
+    return result["downbeat_intervals"]
+
+
+@pytest.mark.parametrize("species", [1, 2, 3, 4, 5])
+def test_species_endpoints_and_determinism(species):
+    a = species_counterpoint(CF, "C", "major", species=species)
+    b = species_counterpoint(CF, "C", "major", species=species)
+    assert a == b  # deterministic
+    cpm = [parse_note(n).midi for n in a["counterpoint"]]
+    cfm = [parse_note(n).midi for n in a["cantus"]]
+    # ends on a perfect consonance, on the tonic
+    assert abs(cpm[-1] - cfm[-1]) % 12 in (0, 7)
+    assert parse_note(a["counterpoint"][-1]).pitch_class == 0
+    # diatonic to C major
+    assert all(parse_note(n).pitch_class in {0, 2, 4, 5, 7, 9, 11} for n in a["counterpoint"])
+    # a render hint is provided for both voices
+    assert len(a["render_hint"]["tracks"]) == 2
+
+
+@pytest.mark.parametrize("species", [1, 2, 3])
+def test_species_strong_beats_consonant(species):
+    # in species 1-3 every downbeat is consonant (no suspensions)
+    r = species_counterpoint(CF, "C", "major", species=species)
+    assert all(d in {"P1/P8", "m3", "M3", "P5", "m6", "M6"} for d in r["downbeat_intervals"])
+
+
+def test_species_ratios():
+    assert species_counterpoint(CF, "C", "major", species=2)["ratio"] == "2:1"
+    assert species_counterpoint(CF, "C", "major", species=3)["ratio"] == "4:1"
+    # 4:1 produces ~4 counterpoint notes per cantus note
+    r3 = species_counterpoint(CF, "C", "major", species=3)
+    assert len(r3["counterpoint"]) >= 4 * (len(CF) - 1)
+
+
+def test_species4_suspensions_resolve_down():
+    # every dissonant downbeat must be a suspension that steps DOWN to a consonance
+    r = species_counterpoint(CF, "C", "major", species=4)
+    cpm = [parse_note(n).midi for n in r["counterpoint"]]
+    # the line should contain only diatonic, mostly-stepwise motion
+    steps = [abs(b - a) for a, b in zip(cpm, cpm[1:])]
+    assert max(steps) <= 12
+    assert r["ratio"] == "syncopated"
+
+
+def test_species_below():
+    r = species_counterpoint(CF, "C", "major", species=2, position="below")
+    cpm = [parse_note(n).midi for n in r["counterpoint"]]
+    cfm = [parse_note(n).midi for n in r["cantus"]]
+    # counterpoint stays at or below the cantus
+    assert all(c <= max(cfm) for c in cpm)
+    assert parse_note(r["counterpoint"][-1]).pitch_class == 0

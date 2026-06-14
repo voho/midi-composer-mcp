@@ -1,10 +1,10 @@
 # midi-composer-mcp
 
-An [MCP](https://modelcontextprotocol.io) server that gives an LLM **atomic music-theory and MIDI tools** for composing — from an idea all the way to a multi-track MIDI file you can actually play.
+An [MCP](https://modelcontextprotocol.io) server that gives an LLM a **large palette of deterministic music-theory and composition tools**, so a composer can state a goal and the LLM finds the best way to achieve it by linking the tools into a composition draft — from "give me the notes of this scale" to a full multi-track song you can actually play.
 
-The design principle: **the tools contain no creativity**. Every tool is a small, deterministic (or seeded-random) step — looking up scales and chords, matching notes, resolving degree sequences, rolling dice, rendering MIDI and audio. The LLM is the composer: it chains the tools, makes every musical choice, and the tools do the mechanical work correctly.
+The guiding split: **the tools contain the rules, the LLM contains the creativity.** Every tool is a small, deterministic step — scales and chords, diatonic harmony, intervals, voice leading, reharmonization, the circle of fifths, motif grammars, sequences, tintinnabuli, species counterpoint, song structure, MIDI and audio rendering. A tool never decides what is "good"; it mechanically applies a rule. The LLM decides *which* rules to invoke and *how* to combine them, so the music follows real theory and is not random.
 
-All tools are **compatible with each other**: notes, chord symbols and rhythm patterns returned by one tool are valid inputs to every other tool.
+Two more invariants: all tools are **compatible** (the note/chord/degree/rhythm output of one is valid input to another), and **randomness is contained** in a few clearly-named, seeded tools (`random_notes`, `random_rhythm`) — everything else is deterministic. See [`CLAUDE.md`](CLAUDE.md) for the full design principles.
 
 ## Note format
 
@@ -51,7 +51,7 @@ The toolset is organized by **layer** — scales, chords, harmony rules, melody,
 | `melodic_sequence` | Repeat a motif as a diatonic sequence (e.g. down a step each time). |
 | `arpeggiate` | Reorder a chord/scale into an arpeggio (up/down/updown/converge/…, multi-octave). |
 | `tintinnabuli_voice` | **Arvo Pärt's tintinnabuli:** shadow a melody with the nearest notes of a fixed triad (T1/T2, above/below/alternating). |
-| `counterpoint` | **First-species counterpoint:** a rule-following counter-melody to a cantus firmus (consonances only, contrary motion, no parallel fifths/octaves). |
+| `counterpoint` | **Species counterpoint (1–5):** a rule-following counter-melody to a cantus firmus — note-against-note through florid, with passing tones and resolving suspensions, no parallel fifths/octaves. Returns a `render_hint` of ready tracks. |
 | `snap_to_scale` | Snap any line to the nearest scale notes — guarantees a melody fits the key/chords. |
 | `transpose_notes` | Transpose a note list by semitones. |
 | `random_notes` | 🎲 Uniform random picks from any note pool (seeded). |
@@ -77,7 +77,108 @@ The toolset is organized by **layer** — scales, chords, harmony rules, melody,
 
 MIDI/audio tools write to `./midi_output` (override per call with `output_dir` or globally with `MIDI_COMPOSER_OUTPUT_DIR`) and also return the file base64-encoded.
 
-See `examples/generate_examples.py` for worked pieces (an Arvo Pärt tintinnabuli study and a full verse/chorus/bridge song) built entirely from these tools.
+## Examples
+
+Each example is a sequence of tool calls. The composer states a goal; the LLM chains tools to reach it. Outputs feed the next call — that's the whole idea.
+
+### Simple
+
+**"Give me the notes of E Dorian."**
+```
+get_scale("dorian", "E")            → E F# G A B C# D E
+```
+
+**"What chord do the notes C, E, G make? And what scales fit them?"**
+```
+match_chords(["C", "E", "G"])       → C (exact);  "E G C" → C/E (first inversion)
+match_scales(["C", "E", "G"])       → C major pentatonic, C major, A minor, …
+```
+(Octaves are ignored, so `["C5","E5","G5"]` gives the same answer.)
+
+**"A ii–V–I in F, with sevenths."**
+```
+degrees_to_chords("F", "major", "ii V I", sevenths=True)   → Gm7  C7  Fmaj7
+```
+
+**"A random melody from A minor pentatonic, then save it as MIDI."**
+```
+get_scale("minor pentatonic", "A5")            → A5 C6 D6 E6 G6 A6   (octave-aware)
+random_notes(<those notes>, count=8, seed=1)   → a reproducible 8-note line  [contained randomness]
+notes_to_midi(<the notes>, tempo=120)          → a .mid file (+ base64)
+midi_to_audio(<that file>)                     → a playable .wav
+```
+
+### Intermediate
+
+**"Build a pop loop: I–V–vi–IV in C with a bass, a hook, and a backbeat."**
+```
+voice_leading(["C","G","Am","F"])                          → smooth pad voicings
+notes_from_degrees("C5","major",[5,5,6,5,3,2,1,1])         → a diatonic hook
+groove("backbeat"); groove("four_on_floor")               → drum patterns
+arrange_to_midi([                                          → one 4-track .mid
+  {"type":"chords","name":"pad","chords":<voicings>,"beats_per_chord":4},
+  {"type":"notes","name":"bass","notes":["C","G","A","F"],"step_beats":4,"octave":2,"program":33},
+  {"type":"notes","name":"lead","notes":<hook>,"octave":5,"program":80},
+  {"type":"drums","name":"drums","step_beats":0.25,"lanes":{"kick":"O...O...O...O...","snare":"....O.......O...","hat":"o.o.o.o.o.o.o.o."}},
+])
+```
+
+**"Reharmonize G7→C and analyze it."**
+```
+tritone_substitute("G7")                  → Db7   (chromatic bass G→Db→C)
+secondary_dominant("Dm")                  → A7    (V7 of ii)
+analyze_progression(["C","A7","Dm","G7","C"], "C", "major")
+                                          → I, V7/ii (chromatic), ii, V7, I
+```
+
+**"Where can I modulate from C major?"**
+```
+circle_of_fifths("C")    → dominant G, subdominant F, relative A minor,
+                           closely related: A minor, G major, E minor, F major, D minor
+```
+
+### Advanced
+
+**"Write a third-species counterpoint to a cantus firmus."**
+```
+counterpoint(["C5","D5","E5","F5","E5","D5","C5"], "C", "major", species=3)
+   → cantus + a 4:1 counter-line (passing tones, perfect-consonance cadence, no parallel 5ths/8ves)
+   → plus render_hint.tracks  →  arrange_to_midi(<render_hint tracks>)  →  midi_to_audio(…)
+```
+
+**"Develop a melody by motif grammar (ABAC), kept in key."**
+```
+motif_grammar("ABAC", {                                    # kind="degrees" stays diatonic
+  "A":[1,2,3,5], "B":{"vary":"A","transpose":1}, "C":{"vary":"A","retrograde":true}}, kind="degrees")
+notes_from_degrees("C5","major", <those degrees>)          → the realized, in-key phrase
+```
+
+**"Compose with tintinnabuli rules over a few maj7 chords, with two verses and a chorus."**
+```
+# Verse M-voice (A minor) + its tintinnabuli T-voice, over voice-led maj7/m7 pads:
+m = notes_from_degrees("A4","natural minor",
+       motif_grammar("ABAC", {"A":[1,2,3,2],"B":{"vary":"A","transpose":1},"C":[3,2,1,1]}, kind="degrees")["degrees"])
+t = tintinnabuli_voice(m, "Am", position="inferior", rank=1)          # nearest A-minor triad note below each M note
+verse_pads  = voice_leading(["Am7","Dm7","Fmaj7","Cmaj7"])["chords"]
+chorus_pads = voice_leading(["Fmaj7","Cmaj7","Dm7","Em7"])["chords"]
+
+arrange_song({                                                        # sequence sections into a song
+  "verse":  {"bars":4, "tracks":[
+     {"type":"chords","name":"pads","chords":verse_pads,"beats_per_chord":4,"program":89},
+     {"type":"notes","name":"M-voice","notes":m,"step_beats":2,"octave":5,"program":48,"sustain":true},
+     {"type":"notes","name":"T-voice","notes":t,"step_beats":2,"octave":4,"program":9,"sustain":true}]},
+  "chorus": {"bars":4, "tracks":[
+     {"type":"chords","name":"pads","chords":chorus_pads,"beats_per_chord":4,"program":89},
+     {"type":"notes","name":"M-voice","notes":notes_from_degrees("C5","major",[5,6,8,6,5,3,2,1])["notes"],"step_beats":2,"octave":5,"program":48,"sustain":true},
+     {"type":"notes","name":"bass","notes":["F","C","D","E"],"step_beats":4,"octave":2,"program":33}]},
+}, form="verse verse chorus", tempo=72)   →   midi_to_audio(<the song>)
+```
+
+These advanced examples (a Pärt tintinnabuli study, a species-3 counterpoint, the tintinnabuli verse/chorus song, and a full verse/chorus/bridge song) are runnable in **`examples/generate_examples.py`**:
+
+```bash
+python examples/generate_examples.py            # writes .mid + .wav for each
+```
 
 ## Playable output
 
