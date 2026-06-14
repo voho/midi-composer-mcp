@@ -410,18 +410,22 @@ def tintinnabuli_voice(melody: str | list[str], triad: str | list[str],
 
 @mcp.tool()
 def counterpoint(cantus: str | list[str], root: str, scale_type: str = "major",
-                 position: str = "above") -> dict:
-    """Write a first-species (note-against-note) counterpoint to a cantus firmus.
+                 species: int = 1, position: str = "above") -> dict:
+    """Write counterpoint to a cantus firmus in any of the five species (Fux), deterministic.
 
     Given your melody (`cantus`) and a key, derives a counter-melody `above` or
-    `below` it that follows the classical first-species rules: consonant
-    intervals only (3rds, 6ths, 5ths, octaves — no dissonant 4ths), perfect
-    consonances at the start and end, contrary/oblique motion preferred, and no
-    parallel or directly-approached perfect fifths/octaves. Deterministic.
-    Render the returned `cantus` and `counterpoint` as two notes tracks sharing
-    one rhythm.
+    `below` it that follows the classical rules. `species`: 1 = note-against-note
+    (1:1), 2 = 2:1 with passing tones, 3 = 4:1 with passing/neighbour figures,
+    4 = syncopated suspensions (a tied dissonance resolving down by step),
+    5 = florid (a mix). Consonances on strong beats, every dissonance treated as
+    a stepwise passing/neighbour tone or a resolved suspension, perfect-consonance
+    ending on the tonic, and no parallel/direct fifths or octaves. Returns both
+    voices, the per-bar downbeat intervals, and a `render_hint` with ready
+    notes-track specs (cantus as whole notes; the counterpoint with its rhythm)
+    you can drop straight into arrange_to_midi.
     """
-    return _counterpoint.first_species(cantus, root, scale_type, position=position)
+    return _counterpoint.species_counterpoint(cantus, root, scale_type,
+                                              species=species, position=position)
 
 
 # ----------------------------------------------------------- song structure

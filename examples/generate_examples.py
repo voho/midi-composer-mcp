@@ -18,6 +18,7 @@ import os
 import sys
 
 from midi_composer_mcp.audio import render_midi_to_wav
+from midi_composer_mcp.counterpoint import species_counterpoint
 from midi_composer_mcp.harmony import voice_leading
 from midi_composer_mcp.melody import (
     motif_grammar,
@@ -131,10 +132,52 @@ def whole_song(out_dir: str) -> dict:
     )
 
 
+def third_species_counterpoint(out_dir: str) -> dict:
+    """A third-species (4:1) counterpoint to a cantus firmus — the rules supplied
+    by the `counterpoint` tool, rendered via its `render_hint`."""
+    cp = species_counterpoint(
+        ["C5", "D5", "E5", "F5", "E5", "D5", "C5"], "C", "major",
+        species=3, position="above",
+    )
+    return render_arrangement(cp["render_hint"]["tracks"], tempo=80,
+                              output_dir=out_dir, file_name="counterpoint_species3.mid")
+
+
+def tintinnabuli_song(out_dir: str) -> dict:
+    """'Compose with tintinnabuli rules over a few maj7 chords, two verses and a
+    chorus' — a worked answer to the advanced prompt, in A minor / C major."""
+    # Verse: an A-minor M-voice shadowed by its A-minor tintinnabuli T-voice,
+    # over maj7/m7 pads (voice-led for smoothness).
+    m_voice = notes_from_degrees(
+        "A4", "natural minor",
+        motif_grammar("ABAC", {"A": [1, 2, 3, 2], "B": {"vary": "A", "transpose": 1},
+                               "C": [3, 2, 1, 1]}, kind="degrees")["degrees"],
+    )["notes"]
+    t_voice = tintinnabuli_voice(m_voice, "Am", position="inferior", rank=1)["t_voice"]
+    verse_pads = voice_leading(["Am7", "Dm7", "Fmaj7", "Cmaj7"], octave=4)["chords"]
+    chorus_pads = voice_leading(["Fmaj7", "Cmaj7", "Dm7", "Em7"], octave=4)["chords"]
+    chorus_mel = notes_from_degrees("C5", "major", [5, 6, 8, 6, 5, 3, 2, 1])["notes"]
+
+    sections = {
+        "verse": {"bars": 4, "tracks": [
+            {"type": "chords", "name": "pads", "chords": verse_pads, "beats_per_chord": 4, "program": 89, "velocity": 55},
+            {"type": "notes", "name": "M-voice", "notes": m_voice, "step_beats": 2.0, "octave": 5, "program": 48, "sustain": True},
+            {"type": "notes", "name": "T-voice", "notes": t_voice, "step_beats": 2.0, "octave": 4, "program": 9, "velocity": 60, "sustain": True},
+        ]},
+        "chorus": {"bars": 4, "tracks": [
+            {"type": "chords", "name": "pads", "chords": chorus_pads, "beats_per_chord": 4, "program": 89, "velocity": 64},
+            {"type": "notes", "name": "M-voice", "notes": chorus_mel, "step_beats": 2.0, "octave": 5, "program": 48, "sustain": True},
+            {"type": "notes", "name": "bass", "notes": ["F", "C", "D", "E"], "step_beats": 4.0, "octave": 2, "program": 33},
+        ]},
+    }
+    return render_song_structure(sections, form="verse verse chorus", tempo=72,
+                                 output_dir=out_dir, file_name="tintinnabuli_song.mid")
+
+
 def main() -> None:
     out_dir = sys.argv[1] if len(sys.argv) > 1 else "examples_output"
     os.makedirs(out_dir, exist_ok=True)
-    for builder in (arvo_part_tintinnabuli, whole_song):
+    for builder in (arvo_part_tintinnabuli, third_species_counterpoint, tintinnabuli_song, whole_song):
         midi = builder(out_dir)
         wav = render_midi_to_wav(midi["file"])
         print(f"{midi['file_name']:32s} {midi.get('total_bars', '?')!s:>4} bars  "
