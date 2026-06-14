@@ -8,5 +8,6 @@ venv/
 .pytest_cache/
 midi_output/
 *.mid
+!demos/*.mid
 .idea/
 .vscode/

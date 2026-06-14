@@ -180,6 +180,14 @@ These advanced examples (a Pärt tintinnabuli study, a species-3 counterpoint, t
 python examples/generate_examples.py            # writes .mid + .wav for each
 ```
 
+### Demo gallery
+
+The [**`demos/`**](demos/) folder is a gallery of finished pieces, each paired with the plain-language **prompt** it answers — from a Pärt-style tintinnabuli study to a modulating pop anthem, a jazz reharmonization, all five counterpoint species, a flamenco piece in Phrygian dominant, and a negative-harmony before/after. The `.mid` files are committed (open them in a DAW); regenerate everything with:
+
+```bash
+python demos/generate.py                        # rewrites demos/*.mid and *.wav
+```
+
 ## Playable output
 
 A bare `.mid` is a valid Standard MIDI File (Format 1, tempo map, General MIDI programs, drums on channel 10) that plays in any DAW or synth — but it needs a soundfont to be *heard*. `midi_to_audio` solves that: it synthesizes the MIDI into a 16-bit PCM **WAV** using only the Python standard library (additive tones for pitched parts, percussive synthesis for drums), so every result is playable anywhere — no soundfont, no external synth. It's a faithful preview, not a production mix.
