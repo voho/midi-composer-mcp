@@ -13,24 +13,35 @@ from mcp.server.fastmcp import FastMCP
 
 from . import audio as _audio
 from . import chords as _chords
+from . import circle as _circle
+from . import counterpoint as _counterpoint
 from . import diatonic as _diatonic
 from . import generate as _generate
+from . import harmony as _harmony
+from . import melody as _melody
 from . import midi_io as _midi
 from . import scales as _scales
+from . import structure as _structure
 
 mcp = FastMCP(
     "midi-composer",
     instructions=(
-        "Atomic music-theory and MIDI tools for composing, from an idea to a"
-        " multi-track MIDI file. Notes are strings like 'C', 'F#', 'Bb' — add an"
-        " octave for concrete pitches ('C5', 'Eb3'; C4 is middle C). Octave-less"
-        " notes are abstract pitch classes; matching ignores octaves entirely."
-        " Every tool's note/chord/rhythm output can be passed to every other"
-        " tool, so compose by chaining — the tools make no creative choices, you"
-        " do. A typical flow: get_scale -> diatonic_chords -> (pick degrees)"
-        " degrees_to_chords -> build a melody and bass from the scale/chord notes"
-        " -> random_rhythm or euclidean_rhythm for grooves -> arrange_to_midi to"
-        " render melody, chords, bass and drums as fitting tracks in one file."
+        "Atomic, deterministic music-theory and MIDI tools for composing a whole"
+        " song from an idea. Layers, each with simple generators you chain:"
+        " SCALES (get_scale, match_scales), CHORDS (get_chord, diatonic_chords,"
+        " degrees_to_chords, match_chords), MELODY (notes_from_degrees,"
+        " arpeggiate, melodic_walk, motif_grammar, random_notes, transpose_notes),"
+        " RHYTHM (random_rhythm, euclidean_rhythm), STRUCTURE (plan_sections,"
+        " arrange_song), and rendering (notes/chords/drums/arrange_to_midi,"
+        " midi_to_audio). Notes are strings like 'C', 'F#', 'Bb' — add an octave"
+        " for concrete pitches ('C5', 'Eb3'; C4 is middle C); octave-less notes"
+        " are pitch classes and matching ignores octaves. Every tool's"
+        " note/chord/degree/rhythm output feeds other tools — the tools make no"
+        " creative choices, you do. Whole-song flow: pick a scale -> build"
+        " progressions (degrees_to_chords) -> melodies (notes_from_degrees /"
+        " motif_grammar / melodic_walk) -> grooves (euclidean_rhythm) -> assemble"
+        " each section's tracks -> arrange_song to sequence intro/verse/chorus/"
+        " bridge/outro into one multi-track file -> midi_to_audio to hear it."
     ),
 )
 
@@ -113,6 +124,81 @@ def match_chords(notes: str | list[str], include_partial: bool = True, limit: in
     return _chords.match_chords(notes, include_partial=include_partial, limit=limit)
 
 
+# ------------------------------------------------------------- harmony rules
+
+@mcp.tool()
+def circle_of_fifths(root: str | None = None) -> dict:
+    """The circle of fifths: key signatures, relative minors, and related keys.
+
+    Without `root`: the twelve keys with their sharp/flat signatures, relative
+    minors and enharmonic spellings. With a key `root` (e.g. 'C', 'Bb', 'F#'):
+    its dominant and subdominant, relative and parallel minors, and the closely
+    related keys — the natural targets for a modulation or a contrasting bridge.
+    """
+    return _circle.circle_of_fifths(root)
+
+
+@mcp.tool()
+def interval_between(note_a: str, note_b: str) -> dict:
+    """Name the interval from note_a up to note_b (semitones + quality, e.g. C->Eb = minor third)."""
+    return _harmony.interval_between(note_a, note_b)
+
+
+@mcp.tool()
+def analyze_progression(chords: str | list, root: str, scale_type: str = "major") -> dict:
+    """Analyze a chord progression into Roman numerals in a key (the inverse of degrees_to_chords).
+
+    Given chords (symbols like ['C','Am','F','G'] or note arrays) and a key,
+    labels each with its Roman numeral, scale degree, whether it is diatonic,
+    and its harmonic function (tonic/subdominant/dominant). Chromatic/borrowed
+    chords are flagged. Use it to understand or transform existing changes.
+    """
+    return _harmony.analyze_progression(chords, root, scale_type)
+
+
+@mcp.tool()
+def voice_leading(chords: str | list, octave: int = 4) -> dict:
+    """Voice a chord progression smoothly — each chord takes the inversion nearest the last.
+
+    Minimizes movement between chords and keeps common tones, like a real
+    keyboard comp. Returns voiced note lists (with octaves) per chord; feed the
+    `chords` (arrays of notes) into chords_to_midi or an arrange/song chords
+    track for natural-sounding pads instead of parallel root-position blocks.
+    """
+    return _harmony.voice_leading(chords, octave=octave)
+
+
+@mcp.tool()
+def secondary_dominant(target: str, chord_type: str = "7") -> dict:
+    """The secondary dominant (V/x) of a target chord — e.g. secondary_dominant('Dm') -> A7.
+
+    Returns the dominant chord a fifth above the target, the standard way to
+    tonicize a non-tonic chord. Pairs well with analyze_progression for reharm.
+    """
+    return _harmony.secondary_dominant(target, chord_type=chord_type)
+
+
+@mcp.tool()
+def tritone_substitute(symbol: str) -> dict:
+    """The tritone substitution of a dominant chord — e.g. tritone_substitute('G7') -> Db7.
+
+    A dominant a tritone away shares the same guide tones, giving a chromatic
+    bass descent (G7->C becomes Db7->C). A staple jazz reharmonization.
+    """
+    return _harmony.tritone_substitute(symbol)
+
+
+@mcp.tool()
+def negative_harmony(notes: str | list[str], tonic: str) -> dict:
+    """Reflect notes through a key's negative-harmony axis (major <-> minor shadow).
+
+    Ernst Levy's mirror (popularized by Jacob Collier): each pitch is reflected
+    around the axis between the tonic and its fifth, flipping a progression's
+    colour while preserving its function. Works on a melody or a chord's notes.
+    """
+    return _harmony.negative_harmony(notes, tonic)
+
+
 # ----------------------------------------------------------------- diatonic
 
 @mcp.tool()
@@ -183,6 +269,200 @@ def euclidean_rhythm(pulses: int, steps: int = 16, rotation: int = 0) -> dict:
     great for basslines and percussion.
     """
     return _generate.euclidean_rhythm(pulses=pulses, steps=steps, rotation=rotation)
+
+
+@mcp.tool()
+def groove(name: str) -> dict:
+    """Return a named rhythm preset (four_on_floor, backbeat, tresillo, son_clave_32, bossa_nova...).
+
+    A library of idiomatic rhythm cells as O/o/. patterns from world and popular
+    music. The pattern feeds the `rhythm` of a notes track or a drum lane (repeat
+    it to fill more bars). Use list_grooves to browse them all.
+    """
+    return _generate.groove(name)
+
+
+@mcp.tool()
+def list_grooves() -> dict:
+    """List every named rhythm preset (clave, bossa, tresillo, dembow, four-on-the-floor...) with descriptions."""
+    return _generate.list_grooves()
+
+
+# ------------------------------------------------------------------ melody
+
+@mcp.tool()
+def notes_from_degrees(root: str, scale_type: str, degrees: str | list[int | str]) -> dict:
+    """Write a melody as scale degrees and get back concrete notes (deterministic).
+
+    Degree 1 is the root; degrees past the scale length wrap up an octave
+    (8 = root +8ve, 9 = 2nd +8ve), negatives go below. e.g.
+    notes_from_degrees('C', 'major', [1,2,3,5,8]) -> C D E G C;
+    notes_from_degrees('A', 'minor pentatonic', '1 3 4 5 7'). Lets you design a
+    melodic contour once and transpose it to any key/scale. The `notes` output
+    feeds a notes track, the rhythm tools, or transpose_notes.
+    """
+    return _melody.notes_from_degrees(root, scale_type, degrees)
+
+
+@mcp.tool()
+def arpeggiate(notes: str | list[str], style: str = "up", octaves: int = 1,
+               seed: int | None = None) -> dict:
+    """Reorder a chord or scale into an arpeggio/broken-chord sequence (deterministic).
+
+    `style`: up, down, updown, downup, converge (outside-in), diverge
+    (inside-out), or random (seeded). `octaves` stacks octave copies first
+    (needs notes with octaves, e.g. a chord from get_chord('min','A4')). Feed a
+    chord's notes to build an arpeggio line or a broken-chord bass; the output
+    is a note list for a notes track.
+    """
+    return _melody.arpeggiate_notes(notes, style=style, octaves=octaves, seed=seed)
+
+
+@mcp.tool()
+def melodic_walk(notes: str | list[str], length: int = 8, seed: int | None = None,
+                 max_step: int = 2, start: int = 0) -> dict:
+    """Generate a singable, stepwise melody by a seeded random walk over a note ladder.
+
+    `notes` is an ordered pitch ladder — usually a scale (pass it over two
+    octaves for more range, e.g. via notes_from_degrees with degrees 1..15).
+    Each step moves up/down by at most `max_step` rungs, so the line is mostly
+    conjunct. Unlike random_notes (uniform jumps), this produces melodic
+    contour. Reproducible via `seed`, always returned. Pair with a rhythm.
+    """
+    return _melody.melodic_walk(notes, length=length, seed=seed, max_step=max_step, start=start)
+
+
+@mcp.tool()
+def melodic_sequence(notes: str | list[str], root: str, scale_type: str,
+                     step: int = -1, count: int = 3) -> dict:
+    """Repeat a motif as a diatonic sequence, shifting it by scale steps each time.
+
+    Restates a motif at successive pitch levels within `root`/`scale_type` — e.g.
+    step=-1, count=4 walks it down one scale degree per repeat (the classic
+    descending sequence). Stays in key, so it remains chord-compatible. The first
+    copy is the motif itself.
+    """
+    return _melody.melodic_sequence(notes, root, scale_type, step=step, count=count)
+
+
+@mcp.tool()
+def transpose_notes(notes: str | list[str], semitones: int) -> dict:
+    """Transpose a note list by semitones, keeping octaves (deterministic).
+
+    Useful for key changes, moving a motif, or building a sequence by repeating
+    a phrase a step higher. e.g. transpose_notes(['C4','E4','G4'], 5) -> F4 A4 C5.
+    """
+    return _melody.transpose_notes(notes, semitones)
+
+
+@mcp.tool()
+def motif_grammar(form: str | list[str], motifs: dict, kind: str = "notes") -> dict:
+    """Build a melody or rhythm from a motif grammar like 'ABAC' (repetition + variation).
+
+    Each letter of `form` names a motif in `motifs`; a motif is a literal
+    sequence or a variation of another. This is how phrases are made: AA repeats,
+    AB contrasts, ABA rounds off, ABAC develops. Deterministic.
+
+    `kind`: 'notes' (motifs are note lists/strings -> a note list), 'degrees'
+    (scale-degree lists -> a degree list for notes_from_degrees), or 'rhythm'
+    (patterns -> one concatenated rhythm string). A variation references another
+    label and applies transforms in order retrograde -> invert -> rotate ->
+    transpose, e.g. {"vary":"A","transpose":2} (semitones for notes, scale steps
+    for degrees), {"vary":"A","retrograde":true}, {"vary":"A","invert":true},
+    {"vary":"A","rotate":1}.
+
+    Example: form='ABAC', motifs={"A":"C5 D5 E5 G5", "B":{"vary":"A","transpose":2},
+    "C":{"vary":"A","retrograde":true}} -> a rounded, developing 16-note phrase.
+    """
+    return _melody.motif_grammar(form, motifs, kind=kind)
+
+
+@mcp.tool()
+def snap_to_scale(notes: str | list[str], root: str, scale_type: str) -> dict:
+    """Snap every note to the nearest note of a scale, so a melody fits the key/chords.
+
+    Guarantees compatibility: any line — hand-written, transposed, or generated
+    — becomes diatonic to `root`/`scale_type`, staying consonant with chords
+    drawn from that scale. Octaves are kept, ties snap down, in-scale notes are
+    untouched. Deterministic. Use it as a safety net after editing or
+    transposing a melody, or to fit borrowed material into the current key.
+    """
+    return _melody.snap_to_scale(notes, root, scale_type)
+
+
+@mcp.tool()
+def tintinnabuli_voice(melody: str | list[str], triad: str | list[str],
+                       position: str = "superior", rank: int = 1, octave: int = 5) -> dict:
+    """Arvo Pärt's tintinnabuli: derive a triad-note counter-voice that shadows a melody.
+
+    Pärt pairs a stepwise melodic voice (M-voice) with a tintinnabuli voice
+    (T-voice) that always sounds a note of a fixed `triad` (classically the
+    tonic) — the nearest triad pitch `superior` (above), `inferior` (below) or
+    `alternating` per note; `rank` 1 = nearest, 2 = second-nearest (T1/T2). Pass
+    the melody (e.g. from melodic_walk or notes_from_degrees over the scale) and
+    a triad ('Am' or ['A','C','E']). Returns aligned `m_voice` and `t_voice`
+    lists — render them as two notes tracks sharing one rhythm (a bell-like
+    program such as 8/9/11/14 suits the T-voice). The T-voice is consonant by
+    construction, so it is always compatible with the harmony.
+    """
+    return _melody.tintinnabuli_voice(melody, triad, position=position, rank=rank, octave=octave)
+
+
+@mcp.tool()
+def counterpoint(cantus: str | list[str], root: str, scale_type: str = "major",
+                 position: str = "above") -> dict:
+    """Write a first-species (note-against-note) counterpoint to a cantus firmus.
+
+    Given your melody (`cantus`) and a key, derives a counter-melody `above` or
+    `below` it that follows the classical first-species rules: consonant
+    intervals only (3rds, 6ths, 5ths, octaves — no dissonant 4ths), perfect
+    consonances at the start and end, contrary/oblique motion preferred, and no
+    parallel or directly-approached perfect fifths/octaves. Deterministic.
+    Render the returned `cantus` and `counterpoint` as two notes tracks sharing
+    one rhythm.
+    """
+    return _counterpoint.first_species(cantus, root, scale_type, position=position)
+
+
+# ----------------------------------------------------------- song structure
+
+@mcp.tool()
+def plan_sections(form: str | list[str], bars=8, beats_per_bar: int = 4,
+                  tempo: int | None = None) -> dict:
+    """Lay out a song form on the timeline: where each section starts and how long it lasts.
+
+    `form` is the running order — a list, a string ('intro verse chorus verse
+    chorus outro'), or a letter form ('AABA'). `bars` is one number for every
+    section, or a mapping of section name to bars (intro/verse/chorus/bridge/
+    outro fall back to sensible defaults). Returns each section's start bar,
+    start beat, length, and (with `tempo`) start time in seconds — use it to
+    place material with `start_beat` in arrange_to_midi, or as the blueprint for
+    arrange_song.
+    """
+    return _structure.plan_sections(form, bars=bars, beats_per_bar=beats_per_bar, tempo=tempo)
+
+
+@mcp.tool()
+def arrange_song(sections: dict, form: str | list[str] | None = None, tempo: int = 120,
+                 beats_per_bar: int = 4, step_beats: float = 0.5,
+                 file_name: str | None = None, output_dir: str | None = None) -> dict:
+    """Assemble named sections (intro/verse/chorus/bridge/outro) into one whole-song MIDI.
+
+    The capstone "build a whole song" tool. `sections` maps a section name to
+    ``{"bars": N, "tracks": [ ...arrange_to_midi-style tracks... ]}`` — each
+    section is a little arrangement (chords, bass, melody, drums) with timing
+    relative to its own start. `form` is the running order (list/string/letters,
+    repeats allowed; omitted = each section once in given order). Sections are
+    placed end to end, and tracks sharing a `name` across sections are stitched
+    into one continuous MIDI track (so "bass" is a single track for the whole
+    song; a part used only in the chorus simply rests elsewhere). Compose each
+    layer with the scale/chord/melody/rhythm tools, drop them into sections, and
+    sequence — then midi_to_audio to hear it. Returns the file plus a section
+    timeline and per-track summary.
+    """
+    return _structure.render_song_structure(sections, form=form, tempo=tempo,
+                                             beats_per_bar=beats_per_bar, step_beats=step_beats,
+                                             file_name=file_name, output_dir=output_dir)
 
 
 # -------------------------------------------------------------------- MIDI

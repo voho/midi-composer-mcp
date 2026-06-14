@@ -160,6 +160,58 @@ def euclidean_rhythm(pulses: int, steps: int = 16, rotation: int = 0) -> dict:
     }
 
 
+# Named rhythm presets: (pattern, step_beats, description). 16-step patterns are
+# one bar of 4/4 in sixteenth notes; 8-step patterns are one bar in eighths.
+GROOVES: dict[str, tuple[str, float, str]] = {
+    "four_on_floor": ("O...O...O...O...", 0.25, "A kick on every beat — house/techno/disco pulse."),
+    "backbeat": ("....O.......O...", 0.25, "Snare on beats 2 and 4 — the backbone of rock and pop."),
+    "offbeat": ("..o...o...o...o.", 0.25, "Hits on the off-beats (the 'and's) — house open hats, ska/reggae skank."),
+    "eighths": ("o.o.o.o.o.o.o.o.", 0.25, "Steady eighth notes — driving hats or a running pulse."),
+    "sixteenths": ("oooooooooooooooo", 0.25, "Steady sixteenths — rolling hats or trance arps."),
+    "tresillo": ("O..o..o.", 0.25, "The 3+3+2 Cuban/Latin cell, ubiquitous in pop and reggaeton."),
+    "cinquillo": ("O.oo.oo.", 0.25, "A five-stroke Cuban cell, denser sibling of the tresillo."),
+    "habanera": ("O..oo.o.", 0.25, "The habanera/tango rhythm — dotted then even."),
+    "son_clave_32": ("O..o..o...o.o...", 0.25, "3-2 son clave, the key pattern of Afro-Cuban son and salsa."),
+    "rumba_clave_32": ("O..o...o..o.o...", 0.25, "3-2 rumba clave — like son clave but the 'three' side is shifted."),
+    "bossa_nova": ("O..o..o...o..o..", 0.25, "A bossa-nova clave variant — gentle Brazilian sway."),
+    "dembow": ("O..oO.o.O..oO.o.", 0.25, "The reggaeton 'dembow' — boom-ch-boom-chick engine."),
+}
+
+
+def groove(name: str) -> dict:
+    """Return a named rhythm preset (clave, bossa, tresillo, four-on-the-floor...).
+
+    A library of idiomatic rhythm cells as O/o/. patterns. The pattern feeds the
+    `rhythm` argument of notes_to_midi / arrange tracks, or a drum lane (repeat
+    it to fill more bars). Use list_grooves to see them all.
+    """
+    if not isinstance(name, str):
+        raise ValueError(f"groove name must be a string, got {type(name).__name__}")
+    key = name.strip().lower().replace(" ", "_").replace("-", "_")
+    if key not in GROOVES:
+        raise ValueError(f"Unknown groove {name!r}. Known grooves: {', '.join(GROOVES)}")
+    pattern, step_beats, description = GROOVES[key]
+    return {
+        "name": key,
+        "pattern": pattern,
+        "step_beats": step_beats,
+        "length_beats": len(pattern) * step_beats,
+        "description": description,
+        "legend": {"O": "strong beat", "o": "weak beat", ".": "pause"},
+    }
+
+
+def list_grooves() -> dict:
+    """List every named rhythm preset with its pattern and description."""
+    return {
+        "count": len(GROOVES),
+        "grooves": [
+            {"name": k, "pattern": p, "step_beats": s, "description": d}
+            for k, (p, s, d) in GROOVES.items()
+        ],
+    }
+
+
 def parse_rhythm(pattern: str) -> str:
     """Validate a rhythm pattern string; whitespace is ignored."""
     if not isinstance(pattern, str):

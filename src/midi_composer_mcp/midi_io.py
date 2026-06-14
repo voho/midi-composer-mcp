@@ -483,8 +483,15 @@ def _channel_allocator():
             yield ch
 
 
-def _build_track(track: dict, index: int, step_beats: float, beats_per_chord: float,
-                 channels) -> dict:
+def build_track_events(track: dict, index: int, step_beats: float,
+                       beats_per_chord: float, base_start: float = 0.0) -> dict:
+    """Build the timed events for one track (no channel assigned yet).
+
+    Used by both render_arrangement (single timeline) and the song assembler
+    (sections placed at successive offsets). `base_start` is added in front of
+    the track's own `start_beat`. Returns the events plus enough metadata for a
+    caller to assign a channel and summarize the track.
+    """
     if not isinstance(track, dict):
         raise ValueError(f"track {index} must be an object, got {type(track).__name__}")
     ttype = track.get("type")
@@ -493,15 +500,13 @@ def _build_track(track: dict, index: int, step_beats: float, beats_per_chord: fl
             f"track {index} has invalid type {ttype!r}; use 'notes', 'chords' or 'drums'"
         )
     name = track.get("name") or ttype
-    start = track.get("start_beat", 0.0)
-    _check_range(f"track {index} start_beat", start, 0, 100000)
+    rel_start = track.get("start_beat", 0.0)
+    _check_range(f"track {index} start_beat", rel_start, 0, 100000)
+    start = base_start + rel_start
     program = track.get("program", 0)
     _check_range(f"track {index} program", program, 0, 127, integer=True)
 
-    explicit_channel = track.get("channel")
-
     if ttype == "drums":
-        channel = DRUM_CHANNEL if explicit_channel is None else explicit_channel
         velocity = track.get("velocity", 100)
         accent = track.get("accent_velocity", 120)
         t_step = track.get("step_beats", step_beats)
@@ -511,7 +516,6 @@ def _build_track(track: dict, index: int, step_beats: float, beats_per_chord: fl
         events, resolved, length = _drum_events(track.get("lanes"), t_step, velocity, accent, start)
         detail = {"lanes": resolved}
     elif ttype == "notes":
-        channel = next(channels) if explicit_channel is None else explicit_channel
         velocity = track.get("velocity", 90)
         accent = track.get("accent_velocity", 110)
         t_step = track.get("step_beats", step_beats)
@@ -526,7 +530,6 @@ def _build_track(track: dict, index: int, step_beats: float, beats_per_chord: fl
                                         accent, track.get("sustain", False), start)
         detail = {"events": _serialize_events(events)}
     else:  # chords
-        channel = next(channels) if explicit_channel is None else explicit_channel
         velocity = track.get("velocity", 80)
         octave = track.get("octave", 4)
         bpc = track.get("beats_per_chord", beats_per_chord)
@@ -538,22 +541,37 @@ def _build_track(track: dict, index: int, step_beats: float, beats_per_chord: fl
                                                  velocity, start)
         detail = {"chords": resolved}
 
-    if explicit_channel is not None:
+    return {
+        "name": name, "type": ttype, "program": program,
+        "is_drums": ttype == "drums", "events": events,
+        "start": start, "rel_start": rel_start, "length": length,
+        "rel_end": rel_start + length, "detail": detail,
+    }
+
+
+def _build_track(track: dict, index: int, step_beats: float, beats_per_chord: float,
+                 channels) -> dict:
+    b = build_track_events(track, index, step_beats, beats_per_chord)
+    explicit_channel = track.get("channel")
+    if explicit_channel is None:
+        channel = DRUM_CHANNEL if b["is_drums"] else next(channels)
+    else:
+        channel = explicit_channel
         _check_range(f"track {index} channel", channel, 0, 15, integer=True)
 
     summary = {
-        "name": name,
-        "type": ttype,
+        "name": b["name"],
+        "type": b["type"],
         "channel": channel,
-        "program": program,
-        "start_beat": start,
-        "length_beats": length,
-        "end_beat": start + length,
-        "event_count": len(events),
-        **detail,
+        "program": b["program"],
+        "start_beat": b["start"],
+        "length_beats": b["length"],
+        "end_beat": b["start"] + b["length"],
+        "event_count": len(b["events"]),
+        **b["detail"],
     }
-    return {"events": events, "channel": channel, "program": program,
-            "name": name, "end_beat": start + length, "summary": summary}
+    return {"events": b["events"], "channel": channel, "program": b["program"],
+            "name": b["name"], "end_beat": b["start"] + b["length"], "summary": summary}
 
 
 def render_arrangement(tracks, tempo: int = 120, file_name: str | None = None,
