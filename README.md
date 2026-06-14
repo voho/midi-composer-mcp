@@ -18,27 +18,66 @@ All tools are **compatible with each other**: notes, chord symbols and rhythm pa
 
 ## Tools
 
-| Tool | What it does (deterministic unless noted) |
-|---|---|
-| `list_scales` | Scale-type database: intervals, degree labels, aliases, and a **one-line description** of each (40+ scales: common, modal, jazz, symmetric, world/exotic). |
-| `list_chords` | Chord-type database: intervals, degrees, symbol suffixes, aliases, **descriptions** (35+ chords: triads → 13ths and altered). |
-| `get_scale` | Describe a scale type; with a root, generate its notes. `maj + C → C D E F G A B C`. |
-| `get_chord` | Describe a chord type; with a root, generate its notes. `min + F → F Ab C`. |
-| `match_scales` | Scales containing the given notes (**octaves ignored**), exact matches flagged. |
-| `match_chords` | Chords matching the given notes (**octaves ignored**); `c e g → C`, `e g c → C/E` (first inversion), partial matches list missing notes. |
-| `diatonic_chords` | The chord on each scale degree, with roman numerals, degree names and harmonic functions (tonic/subdominant/dominant). |
-| `degrees_to_chords` | Resolve a degree sequence *you* chose (`[1,5,6,4]`, `"I V vi IV"`, `"1-5-6-4"`) into concrete chords. |
-| `random_notes` | 🎲 Uniform random picks from any note pool (seeded, reproducible). |
-| `random_rhythm` | 🎲 Random rhythm pattern like `O...Oo..` — `O` strong beat, `o` weak beat, `.` pause (seeded, reproducible). |
-| `euclidean_rhythm` | Evenly-spread rhythm (Bjorklund); `euclidean_rhythm(3,8)` → `O..o..o.` (tresillo). Great for basslines and drums. |
-| `notes_to_midi` | Render a note sequence (scale, arpeggio, melody) to a `.mid` file, optionally shaped by a rhythm pattern. |
-| `chords_to_midi` | Render chord symbols and/or note arrays to a `.mid` file (block or arpeggiated). |
-| `drums_to_midi` | Render named drum lanes (`{"kick":"O...","snare":"..O.","hat":"oooo"}`) to a General MIDI percussion file. |
-| `song_to_midi` | Render melody + chord accompaniment into one two-track `.mid` file (shortcut for the common case). |
-| `arrange_to_midi` | **The capstone:** render any number of fitting tracks — chords, bass, melody, drums — into one multi-track `.mid` file. |
-| `midi_to_audio` | Render any generated `.mid` into a **playable WAV** with a built-in synth (no soundfont needed) so the output is audible on any device. |
+The toolset is organized by **layer** — scales, chords, harmony rules, melody, rhythm, song structure, and rendering — so the LLM can go from an idea to a finished multi-track song. Everything is deterministic (seeded where random).
 
-MIDI/audio tools write to `./midi_output` (override per call with `output_dir` or globally with the `MIDI_COMPOSER_OUTPUT_DIR` environment variable) and also return the file base64-encoded.
+### Scales & chords
+
+| Tool | What it does |
+|---|---|
+| `list_scales` / `get_scale` | 40+ scale types (common, modal, jazz, symmetric, world/exotic), each with a description; generate notes from a root. `maj + C → C D E F G A B C`. |
+| `list_chords` / `get_chord` | 35+ chord types (triads → 13ths and altered), each with a description; generate notes. `min + F → F Ab C`. |
+| `match_scales` / `match_chords` | Find scales/chords containing given notes (**octaves ignored**); inversions detected (`e g c → C/E`), partials list missing notes. |
+| `diatonic_chords` | The chord on each scale degree, with roman numerals, degree names and harmonic functions. |
+| `degrees_to_chords` | Resolve a chosen degree sequence (`[1,5,6,4]`, `"I V vi IV"`) into concrete chords. |
+
+### Harmony rules
+
+| Tool | What it does |
+|---|---|
+| `circle_of_fifths` | Key signatures, relative/parallel minors, and closely related keys (for modulations and bridges). |
+| `interval_between` | Name the interval between two notes (`C→Eb = m3`, `C→F# = A4` vs `C→Gb = d5`). |
+| `analyze_progression` | The inverse of `degrees_to_chords`: chords → roman numerals + functions, chromatic chords flagged. |
+| `voice_leading` | Voice a progression smoothly (nearest inversion, common tones held) — natural pads instead of parallel blocks. |
+| `secondary_dominant` / `tritone_substitute` | Classic reharmonizations (`V/ii of Dm → A7`; `G7 → Db7`). |
+| `negative_harmony` | Reflect notes through a key's negative-harmony axis (major ↔ minor shadow). |
+
+### Melody
+
+| Tool | What it does |
+|---|---|
+| `notes_from_degrees` | Write a melody as scale degrees → notes; transposable to any key/scale. `[1,2,3,5,8]` in C → `C D E G C`. |
+| `motif_grammar` | Build a phrase from a form like `ABAC` over labeled motifs; a variant can `transpose`/`invert`/`retrograde`/`rotate` another. Works on notes, degrees, or rhythm. |
+| `melodic_walk` | A singable line by a seeded random walk over a scale ladder (mostly stepwise). |
+| `melodic_sequence` | Repeat a motif as a diatonic sequence (e.g. down a step each time). |
+| `arpeggiate` | Reorder a chord/scale into an arpeggio (up/down/updown/converge/…, multi-octave). |
+| `tintinnabuli_voice` | **Arvo Pärt's tintinnabuli:** shadow a melody with the nearest notes of a fixed triad (T1/T2, above/below/alternating). |
+| `counterpoint` | **First-species counterpoint:** a rule-following counter-melody to a cantus firmus (consonances only, contrary motion, no parallel fifths/octaves). |
+| `snap_to_scale` | Snap any line to the nearest scale notes — guarantees a melody fits the key/chords. |
+| `transpose_notes` | Transpose a note list by semitones. |
+| `random_notes` | 🎲 Uniform random picks from any note pool (seeded). |
+
+### Rhythm
+
+| Tool | What it does |
+|---|---|
+| `random_rhythm` | 🎲 Random pattern `O...Oo..` — `O` strong, `o` weak, `.` rest (seeded). |
+| `euclidean_rhythm` | Evenly-spread Bjorklund rhythm; `euclidean_rhythm(3,8) → O..o..o.` (tresillo). |
+| `groove` / `list_grooves` | Named presets: four-on-the-floor, backbeat, tresillo, son/rumba clave, bossa nova, dembow… |
+
+### Song structure & rendering
+
+| Tool | What it does |
+|---|---|
+| `plan_sections` | Lay out a form (`"intro verse chorus … outro"` / `"AABA"`) on the timeline — start bars, beats, seconds. |
+| `arrange_song` | **The capstone:** assemble named sections (intro/verse/chorus/bridge/outro) into one whole-song MIDI; like-named tracks stitch into continuous parts. |
+| `notes_to_midi` / `chords_to_midi` / `drums_to_midi` | Render a single track (melody/scale, chords block-or-arpeggiated, GM drum lanes). |
+| `arrange_to_midi` | Render any number of fitting tracks (chords, bass, melody, drums) into one multi-track `.mid`. |
+| `song_to_midi` | Melody + chords as a two-track file (shortcut for the common case). |
+| `midi_to_audio` | Render any generated `.mid` into a **playable WAV** with a built-in synth (no soundfont needed). |
+
+MIDI/audio tools write to `./midi_output` (override per call with `output_dir` or globally with `MIDI_COMPOSER_OUTPUT_DIR`) and also return the file base64-encoded.
+
+See `examples/generate_examples.py` for worked pieces (an Arvo Pärt tintinnabuli study and a full verse/chorus/bridge song) built entirely from these tools.
 
 ## Playable output
 
@@ -121,18 +160,24 @@ Layout:
 
 ```
 src/midi_composer_mcp/
-  notes.py      # note parsing, proper spelling, octaves, MIDI numbers
-  scales.py     # scale database (40+, described), generation, matching
-  chords.py     # chord database (35+, described), symbols, generation, matching
-  diatonic.py   # chords per scale degree, degree-sequence resolution
-  generate.py   # seeded dice: random notes, random rhythm, euclidean rhythm
-  midi_io.py    # deterministic MIDI rendering: notes, chords, drums, multi-track arrangements (mido)
-  audio.py      # MIDI -> playable WAV preview, pure standard library
-  server.py     # the MCP server (FastMCP) — thin wrappers over the above
+  notes.py        # note parsing, proper spelling, octaves, MIDI numbers
+  scales.py       # scale database (40+, described), generation, matching
+  chords.py       # chord database (35+, described), symbols, generation, matching
+  diatonic.py     # chords per scale degree, degree-sequence resolution
+  circle.py       # circle of fifths: key signatures and related keys
+  harmony.py      # intervals, roman-numeral analysis, voice leading, reharmonization
+  melody.py       # degrees, arpeggios, walks, motif grammar, sequence, snap, tintinnabuli
+  counterpoint.py # first-species counterpoint (deterministic, rule-following)
+  generate.py     # seeded dice + euclidean rhythm + groove presets
+  structure.py    # song structure: plan sections, assemble a whole song
+  midi_io.py      # deterministic MIDI rendering: notes, chords, drums, multi-track (mido)
+  audio.py        # MIDI -> playable WAV preview, pure standard library
+  server.py       # the MCP server (FastMCP) — thin wrappers over the above
 ```
 
 ## Roadmap ideas
 
-- Transposition and inversion helpers
-- Humanize options (timing/velocity jitter as a seeded, mechanical step)
+- Rhythmic chord comping (a `rhythm` on chord tracks, for stabs/funk/reggae)
+- Swing/shuffle and humanize (timing/velocity jitter as a seeded, mechanical step)
+- Higher-species counterpoint
 - Reading MIDI files back into note/chord data

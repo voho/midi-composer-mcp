@@ -6,23 +6,23 @@ import json
 from midi_composer_mcp.server import mcp
 
 EXPECTED_TOOLS = {
-    "list_scales",
-    "list_chords",
-    "get_scale",
-    "get_chord",
-    "match_scales",
-    "match_chords",
-    "diatonic_chords",
-    "degrees_to_chords",
-    "random_notes",
-    "random_rhythm",
-    "euclidean_rhythm",
-    "notes_to_midi",
-    "chords_to_midi",
-    "drums_to_midi",
-    "song_to_midi",
-    "arrange_to_midi",
-    "midi_to_audio",
+    # scales & chords
+    "list_scales", "list_chords", "get_scale", "get_chord",
+    "match_scales", "match_chords", "diatonic_chords", "degrees_to_chords",
+    # harmony rules
+    "circle_of_fifths", "interval_between", "analyze_progression", "voice_leading",
+    "secondary_dominant", "tritone_substitute", "negative_harmony",
+    # melody
+    "notes_from_degrees", "arpeggiate", "melodic_walk", "motif_grammar",
+    "snap_to_scale", "tintinnabuli_voice", "counterpoint", "melodic_sequence",
+    "transpose_notes", "random_notes",
+    # rhythm
+    "random_rhythm", "euclidean_rhythm", "groove", "list_grooves",
+    # structure
+    "plan_sections", "arrange_song",
+    # rendering
+    "notes_to_midi", "chords_to_midi", "drums_to_midi", "song_to_midi",
+    "arrange_to_midi", "midi_to_audio",
 }
 
 
