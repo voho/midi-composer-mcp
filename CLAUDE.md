@@ -100,4 +100,7 @@ uv venv && uv pip install -e ".[dev]"
 
 `examples/generate_examples.py` renders worked pieces end to end (style demos,
 an Arvo Pärt tintinnabuli study, a full verse/chorus/bridge song) using only
-these tools — a good reference for how the layers link together.
+these tools — a good reference for how the layers link together. `demos/`
+is a committed gallery (`demos/generate.py` + rendered `.mid`/`.wav`), each
+piece paired with the plain-language prompt it answers; keep both in sync with
+the tools.
