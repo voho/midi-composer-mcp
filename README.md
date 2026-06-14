@@ -40,6 +40,7 @@ The toolset is organized by **layer** — scales, chords, harmony rules, melody,
 | `voice_leading` | Voice a progression smoothly (nearest inversion, common tones held) — natural pads instead of parallel blocks. |
 | `secondary_dominant` / `tritone_substitute` | Classic reharmonizations (`V/ii of Dm → A7`; `G7 → Db7`). |
 | `negative_harmony` | Reflect notes through a key's negative-harmony axis (major ↔ minor shadow). |
+| `harmonize_melody` | Put a chord under each melody note — searching the **whole** chord database — that reuses as many notes from the previous chord as possible, then voice-leads it. Returns ranked options + a `render_hint`. |
 
 ### Melody
 
@@ -135,6 +136,15 @@ analyze_progression(["C","A7","Dm","G7","C"], "C", "major")
 ```
 circle_of_fifths("C")    → dominant G, subdominant F, relative A minor,
                            closely related: A minor, G major, E minor, F major, D minor
+```
+
+**"Put chords under this melody, reusing as many notes as possible between chords."**
+```
+harmonize_melody(["C5","E5","F5","A5","G5"], root="C", scale_type="major", in_scale=True)
+   → searches the whole chord DB for chords containing each note, ranks them by shared
+     notes with the previous chord, picks the smoothest, and voice-leads:
+     C → C → Cadd4 → Am7 → C6 …   (each chord keeps 3 notes from the last)
+   → plus ranked `options` per note and a render_hint (harmony + melody) for arrange_to_midi
 ```
 
 ### Advanced
