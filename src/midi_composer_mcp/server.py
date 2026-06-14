@@ -199,6 +199,30 @@ def negative_harmony(notes: str | list[str], tonic: str) -> dict:
     return _harmony.negative_harmony(notes, tonic)
 
 
+@mcp.tool()
+def harmonize_melody(notes: str | list[str], root: str | None = None, scale_type: str = "major",
+                     in_scale: bool = False, max_chord_notes: int = 4, allow_repeats: bool = True,
+                     options: int = 4, octave: int = 4, step_beats: float = 2.0) -> dict:
+    """Put chords under a melody, each chord reusing as many notes from the previous one as possible.
+
+    For every melody note it searches the WHOLE chord database (all chord types,
+    all roots) for chords that contain that note, ranks them by how many notes
+    they share with the previous chord (most-shared first = smoothest voice
+    leading), auto-picks the top one, and runs voice_leading for the inversions.
+    Each note also lists the top `options` ranked alternatives. Deterministic.
+
+    Pass `root`/`scale_type` with `in_scale=true` to keep the harmony in a key
+    (any chord whose notes fit the scale — not just the seven diatonic chords);
+    otherwise every chord is fair game. `max_chord_notes` caps complexity (4 =
+    triads and sevenths). `allow_repeats=false` forces a different chord on each
+    note. Returns the chosen progression with voiced notes + per-note options,
+    and a `render_hint` (harmony track + melody on top) for arrange_to_midi.
+    """
+    return _harmony.harmonize_melody(notes, root=root, scale_type=scale_type, in_scale=in_scale,
+                                     max_chord_notes=max_chord_notes, allow_repeats=allow_repeats,
+                                     options=options, octave=octave, step_beats=step_beats)
+
+
 # ----------------------------------------------------------------- diatonic
 
 @mcp.tool()

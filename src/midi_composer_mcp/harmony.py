@@ -18,7 +18,7 @@ from .chords import (
 from .diatonic import _HARMONIC_FUNCTIONS, _ROMAN_QUALITY
 from .midi_io import _parse_chord_list, voice_chord
 from .notes import LETTERS, Note, note_from_midi, parse_note, parse_notes, spell_pitch_class, transpose
-from .scales import resolve_scale_type
+from .scales import resolve_scale_type, scale_notes
 
 # ---------------------------------------------------------------- intervals
 
@@ -250,3 +250,128 @@ def negative_harmony(notes, tonic: str) -> dict:
             )
             out.append(note_from_midi(target, prefer_flats=flats).name)
     return {"tonic": tonic_note.pitch_class_name, "notes": out}
+
+
+# ----------------------------------------------------------- harmonization
+
+# A deterministic preference among chord qualities — when two candidates share
+# the same number of notes with the previous chord and are the same size, the
+# more common quality wins, so a melody is harmonized with familiar chords first.
+_TYPE_PREF = {name: i for i, name in enumerate([
+    "major", "minor", "dominant 7", "major 7", "minor 7", "major 6", "minor 6",
+    "suspended 4", "suspended 2", "dominant 9", "major 9", "minor 9", "six nine",
+    "add 9", "minor add 9", "diminished", "augmented", "half-diminished",
+    "minor major 7", "diminished 7",
+])}
+
+
+def harmonize_melody(notes, root: str | None = None, scale_type: str = "major",
+                     in_scale: bool = False, max_chord_notes: int = 4,
+                     allow_repeats: bool = True, options: int = 4,
+                     octave: int = 4, step_beats: float = 2.0) -> dict:
+    """Harmonize a melody: pick a chord under each note that maximizes reuse of the previous chord's notes.
+
+    For every melody note it searches the **whole chord database** (all chord
+    types on all roots) for chords that *contain* that note, ranks them by how
+    many notes they share with the previously chosen chord (most shared first —
+    smoothest voice leading), then auto-picks the top one and runs voice_leading
+    for the inversions. Each note also reports the top `options` ranked
+    alternatives. Deterministic.
+
+    Optional key: pass `root`/`scale_type` with `in_scale=True` to restrict
+    candidates to chords whose notes all fit that scale (any chord type, not just
+    the seven diatonic chords); otherwise every chord is fair game.
+    `max_chord_notes` caps complexity (4 = triads and sevenths). `allow_repeats`
+    lets the same chord underlie consecutive notes (true maximum reuse); set it
+    false to force a new chord each note. Returns the melody, the chosen
+    progression with voiced notes and per-note options, plus a `render_hint`
+    (a harmony track + the melody on top) for arrange_to_midi.
+    """
+    mel = parse_notes(notes)
+    if not 2 <= max_chord_notes <= 6:
+        raise ValueError("max_chord_notes must be between 2 and 6")
+    options = max(1, min(12, options))
+
+    pc_names: dict[int, Note] = {}
+    scale_pcs = None
+    key_name = None
+    if root is not None:
+        scale = resolve_scale_type(scale_type)
+        root_note = parse_notes(root)[0].without_octave()
+        pc_names = {n.pitch_class: n for n in scale_notes(scale, root_note)[:-1]}
+        scale_pcs = frozenset(pc_names)
+        key_name = f"{root_note.name} {scale.name}"
+
+    universe = []  # (root_pc, ChordType, pitch_class_set, size)
+    for ctype in CHORDS.values():
+        size = len(ctype.intervals)
+        if 2 <= size <= max_chord_notes:
+            for pc in range(12):
+                universe.append((pc, ctype, frozenset((pc + s) % 12 for s in ctype.intervals), size))
+
+    def spell(pc):
+        return pc_names.get(pc) or spell_pitch_class(pc)
+
+    chords_out = []
+    symbols = []
+    prev_pcs = prev_key = None
+    for n in mel:
+        mpc = n.pitch_class
+        cands = [c for c in universe if mpc in c[2] and (not in_scale or scale_pcs is None or c[2] <= scale_pcs)]
+        out_of_scale = False
+        if not cands:  # nothing fits the scale here — treat as a non-scale (passing) tone
+            cands = [c for c in universe if mpc in c[2]]
+            out_of_scale = True
+
+        def rank(c):
+            pc, ct, pcs, size = c
+            # primary: most shared notes with the previous chord (smoothest reuse);
+            # then the melody note as a lower chord tone (root first), then a common
+            # quality, then a simpler chord — so triads beat dyads and clusters.
+            shared = len(prev_pcs & pcs) if prev_pcs is not None else 0
+            mpos = [(pc + s) % 12 for s in ct.intervals].index(mpc)
+            return (-shared, mpos, _TYPE_PREF.get(ct.name, 99), size, pc)
+
+        cands.sort(key=rank)
+        if not allow_repeats and prev_key is not None and len(cands) > 1:
+            cands = [c for c in cands if (c[0], c[1]) != prev_key] or cands
+
+        def describe(c):
+            pc, ct, pcs, size = c
+            r = spell(pc)
+            return {
+                "symbol": f"{r.pitch_class_name}{ct.symbol}",
+                "chord_type": ct.name,
+                "notes": [t.name for t in chord_notes(ct, r)],
+                "shares_with_previous": (len(prev_pcs & pcs) if prev_pcs is not None else None),
+            }
+
+        best = cands[0]
+        entry = describe(best)
+        entry["melody_note"] = n.name
+        entry["options"] = [describe(c) for c in cands[:options]]
+        if out_of_scale:
+            entry["melody_out_of_scale"] = True
+        chords_out.append(entry)
+        symbols.append(entry["symbol"])
+        prev_pcs, prev_key = best[2], (best[0], best[1])
+
+    vl = voice_leading(symbols, octave=octave)
+    for entry, v in zip(chords_out, vl["voicings"]):
+        entry["voiced"] = v["notes"]
+
+    result = {
+        "melody": [n.name for n in mel],
+        "progression": symbols,
+        "allow_repeats": allow_repeats,
+        "chords": chords_out,
+        "voicings": vl["chords"],
+        "render_hint": {"tracks": [
+            {"type": "chords", "name": "harmony", "chords": vl["chords"], "beats_per_chord": step_beats},
+            {"type": "notes", "name": "melody", "notes": [n.name for n in mel], "step_beats": step_beats, "octave": 5},
+        ]},
+    }
+    if key_name:
+        result["key"] = key_name
+        result["in_scale"] = in_scale
+    return result

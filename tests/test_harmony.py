@@ -108,6 +108,68 @@ def test_negative_harmony_major_to_minor():
     assert nh == ["G", "C"]
 
 
+# ---------------------------------------------------------------- harmonize
+
+from midi_composer_mcp.harmony import harmonize_melody
+
+
+def _pcs(names):
+    return {parse_note(n).pitch_class for n in names}
+
+
+def test_harmonize_every_chord_contains_its_melody_note():
+    r = harmonize_melody(["C5", "E5", "F5", "A5", "G5"])
+    for c in r["chords"]:
+        assert parse_note(c["melody_note"]).pitch_class in _pcs(c["notes"])
+
+
+def test_harmonize_searches_whole_db_not_just_diatonic():
+    # the opener is a proper triad (not a 2-note power chord), and richer chord
+    # types from the database are available, not only the seven diatonic triads
+    r = harmonize_melody(["C5", "E5", "F5"])
+    assert len(r["chords"][0]["notes"]) == 3                      # opener is a full triad
+    types = {o["chord_type"] for c in r["chords"] for o in c["options"]}
+    assert any(t not in ("major", "minor", "diminished") for t in types)
+
+
+def test_harmonize_options_sorted_by_shared_notes():
+    r = harmonize_melody(["C5", "E5", "F5", "G5"])
+    for c in r["chords"][1:]:  # skip the first (no previous chord)
+        shares = [o["shares_with_previous"] for o in c["options"]]
+        assert shares == sorted(shares, reverse=True)        # ranked most-shared first
+        assert c["shares_with_previous"] == shares[0]        # the chosen one is the top
+        assert c["shares_with_previous"] >= 1                # it reuses at least one note
+
+
+def test_harmonize_deterministic():
+    a = harmonize_melody(["A4", "C5", "B4", "E5", "D5"], root="A", scale_type="natural minor", in_scale=True)
+    b = harmonize_melody(["A4", "C5", "B4", "E5", "D5"], root="A", scale_type="natural minor", in_scale=True)
+    assert a == b
+
+
+def test_harmonize_in_scale_keeps_chords_in_key():
+    r = harmonize_melody(["C5", "D5", "E5", "F5", "G5"], root="C", scale_type="major", in_scale=True)
+    c_major = {0, 2, 4, 5, 7, 9, 11}
+    for c in r["chords"]:
+        assert _pcs(c["notes"]) <= c_major
+
+
+def test_harmonize_allow_repeats_toggle():
+    same = harmonize_melody(["C5", "E5"], allow_repeats=True)
+    diff = harmonize_melody(["C5", "E5"], allow_repeats=False)
+    # both notes fit a C chord; allow_repeats keeps it, distinct forces a change
+    assert same["progression"][0] == same["progression"][1]
+    assert diff["progression"][0] != diff["progression"][1]
+
+
+def test_harmonize_render_hint():
+    r = harmonize_melody(["C5", "E5", "F5"])
+    tracks = r["render_hint"]["tracks"]
+    assert [t["name"] for t in tracks] == ["harmony", "melody"]
+    assert tracks[0]["chords"] == r["voicings"]
+    assert tracks[1]["notes"] == r["melody"]
+
+
 # ----------------------------------------------------------------- counterpoint
 
 def _midis(names):
