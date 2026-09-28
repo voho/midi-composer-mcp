@@ -9,6 +9,9 @@ EXPECTED_TOOLS = {
     # scales & chords
     "list_scales", "list_chords", "get_scale", "get_chord",
     "match_scales", "match_chords", "diatonic_chords", "degrees_to_chords",
+    "roman_to_chords", "progression_library",
+    # analysis
+    "detect_key", "check_voice_leading",
     # harmony rules
     "circle_of_fifths", "interval_between", "analyze_progression", "voice_leading",
     "secondary_dominant", "tritone_substitute", "negative_harmony", "harmonize_melody",

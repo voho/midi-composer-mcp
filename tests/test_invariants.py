@@ -685,7 +685,8 @@ def test_tools_reject_bad_input_with_value_errors(tmp_path):
             "sections": {"v": {"tracks": [{"type": "notes", "notes": ["C4"]}]}}, "chord_type": "m7",
             "note_a": "C", "note_b": "E", "target": "Dm", "symbol": "G7", "tonic": "C", "name": "tresillo",
             "pulses": 3, "midi_file": None, "melody_notes": ["C5"], "semitones": 2, "mode": 1,
-            "text": "Ut queant laxis", "operations": "PLR", "key": "C", "chord": "C", "row": "C C# D D# E F F# G G# A A# B"}
+            "text": "Ut queant laxis", "operations": "PLR", "key": "C", "chord": "C", "row": "C C# D D# E F F# G G# A A# B",
+            "numerals": "I V vi IV"}
     skip = {"midi_to_audio", "list_scales", "list_chords", "list_grooves"}
     failures = []
     for name, fn in inspect.getmembers(server, inspect.isfunction):

@@ -17,3 +17,5 @@ demos/04_counterpoint_species.wav
 .vscode/
 
 .DS_Store
+.claude/worktrees/
+!tests/golden/*.mid

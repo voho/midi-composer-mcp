@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
+from . import analysis as _analysis
 from . import audio as _audio
 from . import chant as _chant
 from . import chords as _chords
@@ -23,6 +24,7 @@ from . import masters as _masters
 from . import melody as _melody
 from . import midi_io as _midi
 from . import modern as _modern
+from . import roman as _roman
 from . import scales as _scales
 from . import structure as _structure
 
@@ -257,6 +259,57 @@ def degrees_to_chords(root: str, scale_type: str, degrees: str | list[int | str]
     This tool only maps degrees to chords; choosing the degrees is up to you.
     """
     return _diatonic.degrees_to_chords(root, scale_type, degrees, sevenths)
+
+
+# ----------------------------------------------------------- roman numerals
+
+@mcp.tool()
+def roman_to_chords(numerals: str | list[str], root: str, scale_type: str = "major") -> dict:
+    """Turn Roman numerals in a key into concrete chords — chromatic, applied, Neapolitan, augmented sixths, inversions.
+
+    Unlike degrees_to_chords (a numeral = a scale position), every mark counts:
+    case is the third (iv in C = Fm), an accidental is measured from the
+    PARALLEL MAJOR (bVII = Bb in C and G in A minor), figures invert (V6 = G/B,
+    I64 = C/G, ii65 = Dm7/F, V42 = G7/F), uppercase+7 is a dominant 7 (IV7 = F7)
+    and Δ7 a major 7 (IVΔ7 = Fmaj7), a bare ø/Δ is the seventh chord (viiø =
+    Bm7b5), other suffixes are root-position chords (V9, Vsus4, I6/9, IΔ9 =
+    Cmaj9, Iadd6 = C6). X/Y is X in the key of Y: V7/V = D7, vii°7/V = F#dim7,
+    V65/vi = E7/G#, V/V/V = A. Specials: N (= N6, Db/F), It6, Fr43, Ger65, Sw43
+    (note arrays, bass first) and Cad64 (C/G). In minor keys vi/vii° take the
+    raised degree and VI/VII the lowered one (A minor: vi = F#m, vii°7 = G#dim7,
+    VII = G). Needs a 7-note scale. Separators: spaces, commas, dashes, '|'.
+    e.g. roman_to_chords('I V6 vi IV64 bVII V7/V iv N6 Ger65 Cad64 V7 I', 'C')
+    -> symbols C G/B Am F/C Bb D7 Fm Db/F [Ab C Eb F#] C/G G7 C, with per chord
+    its kind (diatonic/borrowed/applied/neapolitan/augmented sixth/cadential
+    6-4/chromatic), borrowed_from (parallel modes that hold it), non_scale_notes,
+    fit, figure and bass. `symbols` feed voice_leading, bach_chorale_voicing,
+    chords_to_midi and song sections; slash basses stay in the bass.
+    """
+    return _roman.roman_to_chords(numerals, root, scale_type)
+
+
+@mcp.tool()
+def progression_library(name: str | None = None, root: str | None = None,
+                        scale_type: str | None = None, category: str | None = None) -> dict:
+    """Named chord progressions from a fixed, cited table: pop, jazz, blues, classical, early, sequences, galant schemata.
+
+    28 presets in roman_to_chords' dialect — pop_axis (I V vi IV), doo_wop,
+    circle, royal_road, mario_cadence, double_plagal, plagal_amen, andalusian
+    (i VII VI V), minor_pop; ii_V_I, jazz_turnaround, backdoor, ragtime,
+    minor_ii_V_i; twelve_bar_blues; lament; folia, passamezzo_antico; Laitz's
+    sequences descending_fifths, pachelbel, ascending_5_6; Gjerdingen's
+    schemata prinner, meyer, romanesca, do_re_mi, fenaroli, fonte, monte (with
+    bass_degrees and melody_degrees). `name` matches a name or alias ignoring
+    case ('Canon', 'ii-V-I', 'D2 (-5/+4)'); without it every entry (of one
+    `category`) is listed. Give `root` (and optionally `scale_type`; default
+    major / natural minor by the entry's mode) to resolve the chords, the bass
+    line and a schema's melody in a key. e.g. progression_library('andalusian',
+    root='E') -> chords Em D C B; progression_library('prinner', root='G') ->
+    chords C G/B F#dim/A G, bass C B A G, melody E D C B. Feed `chords` to
+    voice_leading / chords_to_midi, `numerals` to roman_to_chords in any key, a
+    schema's bass/melody to notes tracks or bach_chorale_voicing(melody=...).
+    """
+    return _roman.progression_library(name=name, root=root, scale_type=scale_type, category=category)
 
 
 # --------------------------------------------------------------- randomness
@@ -656,6 +709,59 @@ def phase_shift(notes: str | list[str], repeats_per_stage: int = 2, step_beats: 
     """
     return _modern.phase_shift(notes, repeats_per_stage=repeats_per_stage, step_beats=step_beats,
                                octave=octave)
+
+
+# ------------------------------------------- analysis (read a draft back)
+
+@mcp.tool()
+def detect_key(notes: str | list | None = None, chords: str | list | None = None, tracks: list[dict] | None = None,
+               durations: list[float] | None = None, rhythm: str | None = None, step_beats: float = 1.0,
+               beats_per_chord: float = 4.0, profile: str = "krumhansl", window_beats: float = 0.0,
+               hop_beats: float = 0.0) -> dict:
+    """Find the key of a melody, a progression or a whole arrangement (Krumhansl–Schmuckler key finding).
+
+    Correlates a duration-weighted pitch-class histogram with a key profile in
+    all 24 major/minor keys, exactly as music21 does. Give `notes` (an inner
+    list = simultaneous notes; timed by `durations`, or a `rhythm` as in a
+    notes track, or `step_beats` each) and/or `chords` (each chord
+    `beats_per_chord`), OR `tracks` alone (render_hint / arrange tracks, timed
+    as they render; drums ignored). `profile`: krumhansl (default), temperley,
+    bellman, aarden (major only, per music21), simple. Returns root and
+    scale_type ('major' / 'natural minor' — ready for diatonic_chords,
+    analyze_progression, snap_to_scale, check_voice_leading), correlation,
+    certainty, the 24-key ranking and the histogram; the tonic keeps your
+    spelling (Gb stays Gb). `window_beats` > 0 adds key `regions` (hop_beats
+    defaults to half a window) — where a song modulates.
+    e.g. detect_key(notes='C4 D4 E4 F4 G4 A4 B4 C5') -> C major, r 0.9014;
+    detect_key(chords='C Am F G C Am F G G Em C D G Em C D', window_beats=16, hop_beats=16)
+    -> regions C major (0-32), G major (32-64).
+    """
+    return _analysis.detect_key(notes=notes, chords=chords, tracks=tracks, durations=durations, rhythm=rhythm,
+                                step_beats=step_beats, beats_per_chord=beats_per_chord, profile=profile,
+                                window_beats=window_beats, hop_beats=hop_beats)
+
+
+@mcp.tool()
+def check_voice_leading(voices: list | None = None, voicings: list | None = None, root: str | None = None,
+                        scale_type: str = "major") -> dict:
+    """Lint your own parts for voice-leading faults — parallels, direct fifths, crossing, overlap, resolutions.
+
+    Give `voices` (2+ parts: note lists with octaves, one note per slot, listed
+    highest first; or notes tracks such as bach_chorale_voicing's or
+    counterpoint's render_hint tracks, aligned on every attack) OR `voicings`
+    (voice_leading's `chords`). Violations: parallel and contrary fifths/octaves
+    (spelled, compound too), direct fifths/octaves in the outer voices with a
+    leaping upper voice, voice crossing and overlap, augmented melodic
+    intervals, leaps over an octave; with `root` (+ scale_type, a 7-note key):
+    the leading tone of V/vii° rising to I/vi in the outer voices, chord
+    sevenths falling by step, no doubled leading tone. Warnings: unequal fifths,
+    spacing, SATB range, melodic sevenths, unrecovered leaps, enharmonic
+    fifths. Also music21 motion counts per voice pair and the dissonances above
+    the bass. Fifths/octaves on successive downbeats (Fux species 2-5) are not
+    checked. Run it before arrange_to_midi.
+    e.g. check_voice_leading(voices=[['C5','D5'],['F4','G4']]) -> parallel_fifths at index 1, voices [0, 1].
+    """
+    return _analysis.check_voice_leading(voices=voices, voicings=voicings, root=root, scale_type=scale_type)
 
 
 # ----------------------------------------------------------- song structure
