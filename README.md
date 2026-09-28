@@ -31,9 +31,9 @@ Several tools port the best ideas of composition software as **cited rules** rat
 | `match_scales` / `match_chords` | Find scales/chords containing given notes (**octaves ignored**); inversions detected (`e g c → C/E`), partials list missing notes. |
 | `diatonic_chords` | The chord on each scale degree, with roman numerals, degree names and harmonic functions. |
 | `degrees_to_chords` | Resolve a chosen degree sequence (`[1,5,6,4]`, `"I V vi IV"`) into concrete chords. Numerals are *positions* (`iv` in C is still F); a `warnings` list says when a numeral's case, mark or figure was ignored — use `roman_to_chords` to read numerals literally. |
-| `roman_to_chords` | Roman numerals read **literally** (the inverse of `analyze_progression`; Hookpad-style entry): case is the third (`iv` in C = Fm), accidentals count from the parallel major (`bVII` = Bb; in A minor = G), figures invert (`V6` = G/B, `ii65` = Dm7/F), `IV7` = F7 but `IVΔ7` = Fmaj7, applied chords (`V7/V` = D7, `vii°7/V` = F#dim7, `V/V/V` = A), `N6`, `It6`/`Fr43`/`Ger65`/`Sw43`, `Cad64`. Each chord comes with its kind (diatonic/borrowed/applied/…), `borrowed_from` modes, `non_scale_notes`, fit and bass. |
-| `progression_library` | 28 named, cited progressions in that dialect: pop (axis, doo-wop, royal road, Andalusian…), jazz (ii–V–I, backdoor, ragtime…), 12-bar blues, lament bass, La Folia, passamezzo, Laitz's sequences (descending fifths, Pachelbel, ascending 5-6) and Gjerdingen's galant schemata (Prinner, Meyer, Romanesca, Do-Re-Mi, Fenaroli, Fonte, Monte) with bass and melody degrees. Resolve any of them in any key. |
-| `chord_palette` | Every chord that fits a key, simplest first (a Klimper-style palette), in any scale: the stacked triads/sevenths, or with `extended` every chord type (sus, 6, add9, 7sus4 … up to `max_notes`) whose notes all lie in the scale. `borrow` / `source_modes` / `fifths_steps` add modal-interchange and neighbour-key chords, each with its source, distance, roman numeral (`bVI`, `iv`, `#iv°`), the scales that share it and `same_notes_as` (`C6` = the notes of `Am7`). |
+| `roman_to_chords` | Roman numerals read **literally** (the inverse of `analyze_progression`; Hookpad-style entry): case is the third (`iv` in C = Fm), accidentals count from the parallel major (`bVII` = Bb; in A minor = G), figures invert (`V6` = G/B, `ii65` = Dm7/F), `IV7` = F7 but `IVΔ7` = Fmaj7, applied chords (`V7/V` = D7, `vii°7/V` = F#dim7, `V/V/V` = A), `N6`, `It6`/`Fr43`/`Ger65`/`Sw43`, `Cad64`. Each chord comes with its kind (diatonic/borrowed/applied/…), `borrowed_from` (the parallel modes whose own notes spell it, judged by letters — so `III7` = E7 in C, whose G# no parallel mode has, is `chromatic`), `non_scale_notes`, fit and bass. |
+| `progression_library` | 28 named, cited progressions in that dialect: pop (axis, doo-wop, royal road, Andalusian…), jazz (ii–V–I, backdoor, ragtime…), 12-bar blues, lament bass, La Folia, passamezzo, Laitz's sequences (descending fifths, Pachelbel, ascending 5-6) and Gjerdingen's galant schemata (Prinner, Meyer, Romanesca, Do-Re-Mi, Fenaroli, Fonte, Monte) with bass degrees and — all but the Monte — melody degrees. Resolve any of them in any key, or any scale: a `warning` then names chords that leave it (`andalusian` in D dorian: `VI = B (D#, F#)`), and a schema melody that would clash with its chords is withheld. |
+| `chord_palette` | Every chord that fits a key, simplest first (a Klimper-style palette), in any scale: the stacked triads/sevenths, or with `extended` every chord type (sus, 6, add9, 7sus4 … up to `max_notes`) whose notes all lie in the scale. `borrow` / `source_modes` / `fifths_steps` add modal-interchange and neighbour-key chords, each with its source, distance, roman numeral (`bVI`, `iv`, `#iv°`), the scales whose own notes spell it and `same_notes_as` (`C6` = the notes of `Am7`). Chords are judged by letters + semitones: C harmonic minor has `Ebaug` but no `Abm` (that would need Cb), and a neighbour key keeps the home's letters (from Cb major the key a fifth down gives `Gbm` = `v`, not F#m). |
 
 ### Harmony rules
 
@@ -41,10 +41,10 @@ Several tools port the best ideas of composition software as **cited rules** rat
 |---|---|
 | `circle_of_fifths` | Key signatures, relative/parallel minors, and closely related keys (for modulations and bridges). |
 | `interval_between` | Name the interval between two notes (`C→Eb = m3`, `C→F# = A4` vs `C→Gb = d5`). With octaves it names the real interval, compound or descending (`C4→C5 = P8`, `C4→E5 = M10`, `G4→C4 = P5 descending`). |
-| `analyze_progression` | The inverse of `degrees_to_chords` / `roman_to_chords`: chords → roman numerals + functions. A chord is in key only if **every** tone is (E7 in A natural minor is flagged, with `non_scale_notes: ["G#"]`); numerals follow spelling (`Gb` in C = `bV`, `F#` = `#IV`). It reads inversions (`figure`: `G7/B` → `65`), gives a `roman_figured` numeral that round-trips through `roman_to_chords` (`V65`, `V7/ii`, `N6`, `Ger65`, `Cad64`), labels applied chords (`A7` in C = `V7/ii`), the Neapolitan, augmented sixths and the cadential 6/4, and lists `borrowed_from` for mixture chords (`Fm` in C ← C harmonic major, harmonic/natural minor, phrygian, locrian). In a note array the lowest note (or the first, without octaves) is the bass. |
-| `next_chords` | Rank what may follow the last chord by **Piston's Table of Usual Root Progressions (1941)** — a rule table, never probabilities (the deterministic answer to Hookpad's Magic Chord / Scaler's Suggest). Tiers: an applied chord's resolution; usual / sometimes / less-often diatonic chords; applied V7/x; parallel-minor mixture (major keys); unlisted. Each candidate carries a `roman_to_chords` token, the table rule, common tones, Schoenberg root motion and `movement` (voice_leading's semitone cost); `sort="movement"` puts the smoothest first. |
+| `analyze_progression` | The inverse of `degrees_to_chords` / `roman_to_chords`: chords → roman numerals + functions. A chord is in key only if **every** tone is (E7 in A natural minor is flagged, with `non_scale_notes: ["G#"]`); numerals follow spelling (`Gb` in C = `bV`, `F#` = `#IV`). It reads inversions (`figure`: `G7/B` → `65`), gives a `roman_figured` numeral that round-trips through `roman_to_chords` (`V65`, `V7/ii`, `N6`, `Ger65`, `Cad64`) — with two exceptions: a slash bass the figure grammar cannot write (`F/G`, `Dm/G`, `Csus4/F`: `figure` null) is kept only in `bass_degree`, so re-add it when moving a draft to another key, and an unnamed cluster (`C Db D`) gets `roman_figured` null while its `roman` keeps a `?`. It labels applied chords (`A7` in C = `V7/ii`), the Neapolitan, augmented sixths and the cadential 6/4, and lists `borrowed_from` for mixture chords — the parallel modes whose own notes spell them (`Fm` in C ← C harmonic major, harmonic/natural minor, phrygian, locrian; `G#` in C ← none, as C minor has Ab). In a note array the lowest note (or the first, without octaves) is the bass, and a 2–3 note array missing its fifth (a shell `D F C`, a fifthless V7) is read as that chord, with `omitted_fifth`. |
+| `next_chords` | Rank what may follow the last chord by **Piston's Table of Usual Root Progressions (1941)** — a rule table, never probabilities (the deterministic answer to Hookpad's Magic Chord / Scaler's Suggest). Tiers: an applied chord's resolution (after an augmented sixth: V and the cadential 6/4, `Cad64`); usual / sometimes / less-often diatonic chords; applied V7/x; parallel-minor mixture (major keys); unlisted. The last chord itself is never offered. Each candidate carries a `roman_to_chords` token (null for a stacked chord that dialect cannot write), the table rule, common tones, Schoenberg root motion and `movement` (voice_leading's semitone cost); `sort="movement"` puts the smoothest first. |
 | `voice_leading` | Voice a progression smoothly (nearest inversion, common tones held) — natural pads instead of parallel blocks. |
-| `voice_chords` | Voice a progression in an arranging style (Scaler's voicings): `drop2` / `drop3` / `drop24`, `open`, `shell` (R-3-7 / R-7-3), Mark Levine's rootless A/B left-hand voicings (`rootless_a`, `rootless_b`, or `rootless` to pick the better-connecting one), or `close` (= `voice_leading`). Connected greedily with voice_leading's cost; a slash bass stays at the bottom; `top_notes` puts a melody on top. `Cmaj7` drop2 → `G3 C4 E4 B4`; `Dm7 G7 Cmaj7` rootless → `F3 A3 C4 E4 · F3 A3 B3 E4 · E3 G3 B3 D4`. |
+| `voice_chords` | Voice a progression in an arranging style (Scaler's voicings): `drop2` / `drop3` / `drop24`, `open`, `shell` (R-3-7 / R-7-3), Mark Levine's rootless A/B left-hand voicings (`rootless_a`, `rootless_b`, or `rootless`, which starts from whichever form gives the smaller total movement — A-B-A or B-A-B), or `close` (= `voice_leading`). Connected greedily with voice_leading's cost; a slash bass stays at the bottom; `top_notes` puts a melody on top. `Cmaj7` drop2 → `G3 C4 E4 B4`; `Dm7 G7 Cmaj7` rootless → `F3 A3 C4 E4 · F3 A3 B3 E4 · E3 G3 B3 D4`. |
 | `secondary_dominant` / `tritone_substitute` | Classic reharmonizations (`V/ii of Dm → A7`; `G7 → Db7`). |
 | `negative_harmony` | Reflect notes through a key's negative-harmony axis (major ↔ minor shadow), in any key: `D F# A` in D → `A F D` (D minor). |
 | `harmonize_melody` | Put a chord under each melody note — searching the **whole** chord database — that reuses as many notes from the previous chord as possible, then voice-leads it. Returns ranked options + a `render_hint`. |
@@ -69,7 +69,7 @@ Several tools port the best ideas of composition software as **cited rules** rat
 | Tool | What it does |
 |---|---|
 | `chord_pattern` | Play a chord-relative figure over a whole progression (like Scaler's Motions). Presets: `alberti` (`^1 3 2 3`), `up`, `down`, `updown`, `murky` (broken octaves) — or your own steps: an index into the voicing (`4` of a triad is the bottom note an octave up), `^` for an accent, `'`/`,` for an octave up/down, `.` for a rest. `mode="scale"` plays the key's scale from each chord root instead (an off-scale chord falls back to chord mode); `phase="continue"` carries the figure across chord changes (Scaler's Follow). Voicings come from `voice_leading`, or `smooth=false` keeps note arrays as written (so `voice_chords` can drive it). Returns a notes track and a `render_hint` (voicings plus pattern). |
-| `bass_line` | A bass part by fixed rules, folded into the walking register E1–G3: `root`, `root_fifth` (country two-beat), `root_octave`, `approach` (chromatic approach into the next chord: `G → F#`, `C → Db`), `walking` (chord tones on beats 1–3, a chromatic approach on beat 4 — a simplified form of walking-bass teaching, after Friedland), `pedal`. Your own `rhythm`, one `beats_per_chord` per chord, `ending` loop/root. GM finger bass (program 33). |
+| `bass_line` | A bass part by fixed rules, folded into the walking register E1–G3: `root`, `root_fifth` (country two-beat; over a 6/4 like `C/G` the alternate is the root), `root_octave` (a bass from Ab2 up drops an octave so its octave fits), `approach` (chromatic approach into the next chord: `G → F#`, `C → Db`), `walking` (chord tones on beats 1–3, a chromatic approach on beat 4 — a simplified form of walking-bass teaching, after Friedland), `pedal`. Your own `rhythm`, one `beats_per_chord` per chord, `ending` loop (the last note leads by a semitone into the line's actual first note, even an octave away) or root, and `sustain` (unset = the style's own: root, approach and pedal hold, the others play detached; a hold never crosses a chord change). GM finger bass (program 33). |
 
 ### Historical melody rules
 
@@ -87,7 +87,7 @@ Several tools port the best ideas of composition software as **cited rules** rat
 |---|---|
 | `rameau_fundamental_bass` | **Rameau** (1722): the root line under any progression; root motion by fifth/third/step; cadence parfaite, irrégulière, rompue. |
 | `schoenberg_progressions` | **Schoenberg**'s root-progression classes: ascending (strong), descending, superstrong — read from the sounding interval, so spelling never matters. |
-| `bach_chorale_voicing` | **Bach-chorale** four-part (SATB) voicing: ranges, spacing, doubling, no parallels/overlaps, leading tone up, sevenths down — plus a four-track `render_hint`. |
+| `bach_chorale_voicing` | **Bach-chorale** four-part (SATB) voicing: ranges, spacing, doubling, no parallels/overlaps, no melodic augmented intervals (the A2 of b6→#7 in minor), leading tone up, sevenths down, an augmented sixth expanding outward (#4 up, b6 down a semitone) — plus a four-track `render_hint`. |
 | `neo_riemannian` | **Riemann / Lewin / Cohn** P, L, R triad transformations (C → Em → G → Bm …). |
 | `bartok_axis` | **Bartók**'s axis system (Lendvai): tonic, subdominant and dominant axes of minor-third-related keys. |
 | `coltrane_changes` | **Coltrane** changes: a ii–V–I through three tonal centres a major third apart (*Giant Steps*). |
@@ -108,7 +108,7 @@ Several tools port the best ideas of composition software as **cited rules** rat
 | Tool | What it does |
 |---|---|
 | `detect_key` | **Krumhansl–Schmuckler key finding** (the five profiles and the tonal-certainty measure exactly as in music21): notes, chords or whole tracks → the best-correlating major/minor key, its certainty and the full 24-key ranking, ready for `diatonic_chords` / `analyze_progression`. The tonic keeps your spelling (`Gb` stays `Gb`). `window_beats` gives key **regions** — where a song modulates. |
-| `check_voice_leading` | Lint **your own parts** the way `check_melody` lints a cantus: note lists, `voice_leading` / `voice_chords` voicings, or notes tracks such as `bach_chorale_voicing` / `counterpoint` render hints. Parallel, contrary and direct fifths/octaves (spelled, compound too), crossing, overlap, augmented melodic intervals; with a key also the leading tone, chord sevenths and doubled leading tones. Plus music21 motion counts per voice pair and the dissonances above the bass. |
+| `check_voice_leading` | Lint **your own parts** the way `check_melody` lints a cantus: note lists, `voice_leading` / `voice_chords` voicings, or notes tracks such as `bach_chorale_voicing` / `counterpoint` render hints. Parallel, contrary and direct fifths/octaves (spelled, compound too), crossing, overlap, augmented melodic intervals; with a key also the leading tone, chord sevenths, the augmented sixth's resolution (#4 up, b6 down a semitone: `augmented_sixth`) and doubled leading tones. Voicings may differ in size (I V7 I). Plus music21 motion counts per voice pair and the dissonances above the bass. |
 | `find_cadences` | Label the cadence at each phrase end: **authentic** perfect/imperfect, **half** (including the Phrygian iv6–V), **plagal**, **deceptive** (V–vi, bVI, V–IV6) or **none**, each with its reason, span, romans, soprano/bass degrees and cadential-6/4 and Picardy flags (Kostka–Payne–Almén, Caplin, Aldwell & Schachter). A PAC needs root-position V–I **and ^1 in the soprano**; without a soprano it says so (`subtype: null`) instead of guessing. Phrase ends: a list, `'all'`, or `phrase_length`. |
 
 ### Rhythm
@@ -124,7 +124,7 @@ Several tools port the best ideas of composition software as **cited rules** rat
 | Tool | What it does |
 |---|---|
 | `plan_sections` | Lay out a form (`"intro verse chorus … outro"` / an uppercase letter form `"AABA"`; a single word like `"verse"` is one section) on the timeline — start bars, beats, seconds. |
-| `arrange_song` | **The capstone:** assemble named sections (intro/verse/chorus/bridge/outro) into one whole-song MIDI; like-named tracks stitch into continuous parts; `swing`/`swing_unit` swing every section on one global grid. |
+| `arrange_song` | **The capstone:** assemble named sections (intro/verse/chorus/bridge/outro) into one whole-song MIDI; like-named tracks stitch into continuous parts; `swing`/`swing_unit` swing every section on the song's bar grid (pairs counted from each downbeat; in an odd meter with `swing_unit` 1 the bar's last quarter stays straight). |
 | `notes_to_midi` / `chords_to_midi` / `drums_to_midi` | Render a single track (melody/scale; chords as blocks, arpeggios or **comped** — per-chord `durations`, an `O/o/.` strike `rhythm` with `sustain`, a guitar `strum` down/up/alternate; GM drum lanes). All take `swing` (0.5 straight … 2/3 triplet … 0.75) and `swing_unit` (0.25/0.5/1 beat). |
 | `arrange_to_midi` | Render any number of fitting tracks (chords, bass, melody, drums) into one multi-track `.mid`; chords tracks take the comping fields, and every track can swing (a track's own `swing` overrides the renderer's). |
 | `song_to_midi` | Melody + chords as a two-track file (shortcut for the common case), optionally swung. |
@@ -239,7 +239,7 @@ analyze_progression(["C","A7","Dm","G7","C"], "C", "major")
 **"Is E7 in A minor? And what is the negative-harmony mirror of a D major chord?"**
 ```
 analyze_progression(["Am","E7","Am"], "A", "natural minor")
-                                          → E7 = V7, in_key false, non_scale_notes ["G#"]  (borrowed from harmonic minor)
+                                          → E7 = V7, in_key false, non_scale_notes ["G#"], function_note "harmonic-minor dominant"
 analyze_progression(["Am","E7","Am"], "A", "harmonic minor")   → E7 = V7, in key, dominant
 negative_harmony(["D","F#","A"], "D")     → A F D   (D major ↔ D minor, in any key)
 ```
@@ -291,7 +291,7 @@ voice_chords(["Dm7","G7","Cmaj7"], "shell")    → D3 F3 C4 (R-3-7) | G3 B3 F4 (
 ```
 roman_to_chords("I vi IV V", "C")               → C Am F G
 chord_pattern(<symbols>, "alberti")             → C4 G4 E4 G4 ×2 | C4 A4 E4 A4 ×2 | C4 A4 F4 A4 ×2 | D4 B4 G4 B4 ×2
-bass_line(<symbols>, "walking")                 → C2 E2 G2 G#2 | A2 C3 E3 Gb3 | F3 C3 A2 Ab2 | G2 B2 D3 Db3
+bass_line(<symbols>, "walking")                 → C2 E2 G2 G#2 | A2 C3 E3 Gb3 | F3 C3 A2 Ab2 | G2 B2 D3 Db2   (Db2 leads back into C2)
 arrange_to_midi(<chord_pattern render_hint tracks> + <bass_line render_hint tracks>)   → chords, pattern and bass
 ```
 
@@ -306,9 +306,10 @@ chord_palette("C", sevenths=True, source_modes=["natural minor", "dorian"])
 ```
 arrange_to_midi([
   {"type":"chords","name":"skank","chords":["Am","D"],"step_beats":0.5,"rhythm":".o.o.o.o","program":27},
-  {"type":"notes","name":"bass","notes":"A2 A2 E3 D3 D3 A2","rhythm":"O..o....O..o....","step_beats":0.5,"sustain":true,"program":33},
-  {"type":"drums","name":"drums","step_beats":0.25,"lanes":{"kick":"........O.......","side_stick":"........O.......","hat":"o.o.o.o.o.o.o.o."}},
-], tempo=74)                                  → chord stabs on every "and" (beats 0.5, 1.5, 2.5 …), drop on beat 3
+  {"type":"notes","name":"bass","notes":"A2 A2 E3 D3 D3 A2","rhythm":"O..o..o.O..o..o.","step_beats":0.5,"sustain":true,"program":33},
+  {"type":"drums","name":"drums","step_beats":0.25,"lanes":{"kick":"........O...............O.......","side_stick":"........O...............O.......","hat":"o.o.o.o.o.o.o.o.o.o.o.o.o.o.o.o."}},
+], tempo=74)                                  → chord stabs on every "and" (beats 0.5, 1.5, 2.5 …), bass A A E | D D A,
+                                                the one-drop (kick + side stick) on beat 3 of both bars
 chords_to_midi(["G","D/F#","Em","C"], step_beats=0.5, rhythm="O.oo.oo.", sustain=True,
                strum=0.02, strum_direction="alternate", program=25)
    → strikes at beats 0, 1, 1.5, 2.5, 3 of each chord (down, down, up, up, down), each held to the next
@@ -410,6 +411,7 @@ analyze_progression(["C","E7/G#","Am","C7","F","Fm","C/G","G7","C"], "C")
      C/G: special "Cad64", function still "tonic", function_note "dominant (cadential 6/4)"
 roman_to_chords(<the roman_figured list>, "Eb")   → Eb G7/B Cm Eb7 Ab Abm Eb/Bb Bb7 Eb
 ```
+(Every bass here is a chord member, so the move is exact. A slash bass the figure grammar cannot write — `F/G`, `Dm/G` — comes back as plain `IV` / `ii` with `figure` null and `bass_degree` 5: re-add the slash in the new key, e.g. `Ab/Bb`.)
 
 **"Grow a progression step by step, preferring smooth movement; borrow colour chords for the chorus."**
 ```
@@ -431,7 +433,7 @@ detect_key(tracks=<any render_hint or arrange_song section tracks>, window_beats
 **"Autumn-Leaves-style changes: rootless voicings in the left hand, drop-2 block chords under my melody in the right."**
 ```
 chords = ["Cm7","F7","Bbmaj7","Ebmaj7","Am7b5","D7b9","Gm6"]
-lh = voice_chords(chords, "rootless")          → Eb3 G3 Bb3 D4 (A) | Eb3 G3 A3 D4 (B) | D3 F3 A3 C4 (A) | …
+lh = voice_chords(chords, "rootless")          → Bb3 D4 Eb4 G4 (B) | A3 D4 Eb4 G4 (A) | A3 C4 D4 F4 (B) | …   (B-A-B…: 25 semitones in all)
 rh = voice_chords(chords, "drop2", octave=5, top_notes=["Eb6","Eb6","D6","D6","C6","C6","Bb5"])   # melody on top
    → C5 G5 Bb5 Eb6 | C5 F5 A5 Eb6 | Bb4 F5 A5 D6 | …
 arrange_to_midi([{**lh["render_hint"]["tracks"][0], "name":"left hand"},
@@ -445,7 +447,7 @@ chord_pattern(["Dm7","G7","Dm7","Cmaj7"], "^1 2 3 4 5 6", beats_per_chord=2, ste
               mode="scale", root="D", scale_type="dorian", phase="continue")
    → 6-step runs up D Dorian from each chord root, carried over the bar lines (Scaler's Follow)
 progression_library("jazz_turnaround", root="F")   → Fmaj7 Dm7 Gm7 C7
-bass_line(<chords>, "walking")                     → F2 A2 C3 C#3 | D3 F3 D3 F#3 | G3 F3 D3 Db3 | C3 E3 G3 Gb3
+bass_line(<chords>, "walking")                     → F2 A2 C3 C#3 | D3 F3 D3 F#3 | G3 F3 D3 Db3 | C3 E3 G3 Gb2
 arrange_to_midi([{"type":"chords","chords":voice_leading(<chords>)["chords"],"rhythm":"O..o..o.","step_beats":0.5},
                  <bass_line render_hint track>], swing=2/3)            → a swung comp over the walking line
 ```
@@ -505,7 +507,7 @@ Every intermediate result is plain data the LLM can inspect, edit by hand (tweak
 ```jsonc
 [
   {"type":"chords","name":"pad",   "chords":["Am","F","C","G"], "beats_per_chord":4, "octave":4, "program":89},
-  {"type":"chords","name":"comp",  "chords":["Am","F","C","G"], "durations":[4,4,2,6], "rhythm":"O..o..o.", "step_beats":0.5, "sustain":true, "strum":0.03, "strum_direction":"alternate"},
+  {"type":"chords","name":"comp",  "chords":["Am","F","C","G"], "durations":[4,4,2,6], "rhythm":"O..o..o.O..o..o.O..oO..o..o.o...", "step_beats":0.5, "sustain":true, "strum":0.03, "strum_direction":"alternate"},
   {"type":"notes", "name":"bass",  "notes":["A","F","C","G"],   "rhythm":"O..o..o..o..o...", "octave":2, "program":33, "step_beats":0.25},
   {"type":"notes", "name":"lead",  "notes":["A4","C5","E5","D5"], "octave":5, "program":0},
   {"type":"drums", "name":"drums", "lanes":{"kick":"O...O...","snare":"..O...O.","hat":"oooooooo"}}
@@ -513,7 +515,7 @@ Every intermediate result is plain data the LLM can inspect, edit by hand (tweak
 ```
 Shared per-track options: `name`, `velocity`, `start_beat` (beat offset for intros/drops), `step_beats`, `swing`/`swing_unit`, `channel` (auto-assigned around any channels you set explicitly; drums always go to the GM percussion channel 10). MIDI has 15 melodic channels, so more than 15 melodic tracks is an error — in `arrange_to_midi` give parts that share an instrument the same `channel`; in `arrange_song`, reuse a track `name` across sections. `arrange_song` writes a time signature matching its `beats_per_bar`.
 
-Chords tracks can be **comped**: `durations` (one beat length per chord, replacing `beats_per_chord`) gives a variable harmonic rhythm. `rhythm` is an `O/o/.` pattern on the track's `step_beats` grid, either one chord long (repeated for every chord) or the whole track long. `O` strikes the whole voicing at `accent_velocity` (100), `o` at `velocity`, and `.` rests; with `sustain` a rest holds the strike, but never past the chord change. `strum` (0–0.25 beats) staggers the voices low to high (`"down"`), high to low (`"up"`) or both (`"alternate"`), and all voices end together. `rhythm` and `strum` cannot be combined with `arpeggiate`. **Swing** (`swing` 0.5 = straight, 0.6667 = triplet swing, max 0.75; `swing_unit` 0.25/0.5/1.0 beat) delays every second step on the absolute timeline, so offset tracks and song sections swing together and on-beats never move. With the defaults every renderer writes exactly the file it always wrote (golden files in `tests/golden/` guard this).
+Chords tracks can be **comped**: `durations` (one beat length per chord, replacing `beats_per_chord`) gives a variable harmonic rhythm. `rhythm` is an `O/o/.` pattern on the track's `step_beats` grid, either one chord long (repeated for every chord; only when every chord lasts the same) or the whole track long — the comp above has mixed durations, so its rhythm spans all 16 beats (32 steps: 8 + 8 + 4 + 12). `O` strikes the whole voicing at `accent_velocity` (100), `o` at `velocity`, and `.` rests; with `sustain` a rest holds the strike, but never past the chord change. `strum` (0–0.25 beats) staggers the voices low to high (`"down"`), high to low (`"up"`) or both (`"alternate"`: down on even steps of the absolute `step_beats` grid, counted from beat 0 with `start_beat` included, up on odd ones — in `arrange_song` counted from the section start), and all voices end together. `rhythm` and `strum` cannot be combined with `arpeggiate`. **Swing** (`swing` 0.5 = straight, 0.6667 = triplet swing, max 0.75; `swing_unit` 0.25/0.5/1.0 beat) delays every second step, and on-beats never move. `arrange_to_midi` and the single-track renderers swing on the absolute timeline, so offset tracks swing together; `arrange_song` swings on the song's bar grid, counting pairs from each downbeat, so every section swings alike and bar lines never move (in an odd meter with `swing_unit` 1.0, such as 3/4, the bar's unpaired last quarter stays straight). With the defaults every renderer writes exactly the file it always wrote (golden files in `tests/golden/` guard this).
 
 ## Installation
 
@@ -569,7 +571,7 @@ uv venv && uv pip install -e ".[dev]"      # or: python3 -m venv .venv && .venv/
 .venv/bin/python -m pytest
 ```
 
-Besides per-tool unit tests, `tests/test_invariants.py` holds **property sweeps** that guard whole classes of bugs: every key-relative tool must give the same result in all 12 keys (transposed), every chord spelling one tool accepts must work in the others, `analyze_progression` must round-trip `diatonic_chords` and judge key membership by every chord tone, the degree number line must have no gaps, and an independent Fux rule checker sweeps species 1–5 over many cantus firmi, keys and both positions. When you add a tool, add it to the relevant sweep.
+Besides per-tool unit tests, `tests/test_invariants.py` holds **property sweeps** that guard whole classes of bugs: every key-relative tool must give the same result in all 12 keys (transposed), every chord spelling one tool accepts must work in the others, `analyze_progression` must round-trip `diatonic_chords` and judge key membership by every chord tone, the degree number line must have no gaps, an independent Fux rule checker sweeps species 1–5 over many cantus firmi, keys and both positions, and every MCP wrapper in `server.py` must forward all of its function's parameters with the same defaults. When you add a tool, add it to the relevant sweep.
 
 Layout:
 

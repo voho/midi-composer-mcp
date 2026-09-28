@@ -709,6 +709,41 @@ def test_tools_reject_bad_input_with_value_errors(tmp_path):
     assert not failures, "\n".join(failures)
 
 
+def test_server_wrappers_forward_every_parameter_with_its_default():
+    """Each MCP wrapper passes every parameter of the function it wraps, under the same default.
+
+    A parameter the wrapper forgets (bass_line's `sustain` once) is invisible over
+    MCP, and a changed default makes the tool and the library disagree.
+    """
+    import ast
+    import inspect
+    from midi_composer_mcp import server
+    # deliberate: midi_to_audio renders a fixed 5-minute preview, as its docstring says
+    hidden = {("midi_to_audio", "max_seconds")}
+    tree = ast.parse(inspect.getsource(server))
+    problems, checked = [], 0
+    for node in tree.body:
+        if not (isinstance(node, ast.FunctionDef) and node.decorator_list):
+            continue
+        call = next(n for n in ast.walk(node) if isinstance(n, ast.Return)).value
+        target = getattr(getattr(server, call.func.value.id), call.func.attr)
+        wrapper = inspect.signature(getattr(server, node.name)).parameters
+        params = list(inspect.signature(target).parameters.values())
+        passed = {params[i].name: ast.unparse(a) for i, a in enumerate(call.args)}
+        passed.update({kw.arg: ast.unparse(kw.value) for kw in call.keywords})
+        for p in params:
+            if (node.name, p.name) in hidden:
+                continue
+            source = passed.get(p.name)
+            if source is None:
+                problems.append(f"{node.name} does not pass {p.name}")
+            elif source in wrapper and wrapper[source].default != p.default:
+                problems.append(f"{node.name}.{source} defaults to {wrapper[source].default!r},"
+                                f" {target.__name__}.{p.name} to {p.default!r}")
+        checked += 1
+    assert checked > 50 and not problems, "\n".join(problems)
+
+
 # ------------------------------------------- regressions found by the review pass
 
 def test_transposition_spelling_edge_cases():
