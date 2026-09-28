@@ -9,19 +9,23 @@ import itertools
 import json
 import os
 import random
+import re
 
 import pytest
 
-from midi_composer_mcp.analysis import PROFILES, check_voice_leading, detect_key
+from midi_composer_mcp.analysis import PROFILES, _slice_chord, check_voice_leading, detect_key
+from midi_composer_mcp.chant import cantus_firmus
 from midi_composer_mcp.counterpoint import species_counterpoint
 from midi_composer_mcp.diatonic import diatonic_chords
 from midi_composer_mcp.harmony import voice_leading
 from midi_composer_mcp.masters import (
-    _VOICES, _consecutive_perfect, _direct_perfect, _overlap, _pair_parallels, _transition_faults,
-    bach_chorale_voicing,
+    _VOICES, _augmented_sixth, _consecutive_perfect, _direct_perfect, _melodic_augmented, _overlap, _pair_parallels,
+    _transition_faults, bach_chorale_voicing,
 )
 from midi_composer_mcp.melody import melodic_walk, notes_from_degrees
 from midi_composer_mcp.notes import LETTERS, parse_note, transpose
+from midi_composer_mcp.roman import progression_library, roman_to_chords
+from midi_composer_mcp.voicing import voice_chords
 
 TONICS = ["C", "G", "D", "A", "E", "B", "F#", "C#", "F", "Bb", "Eb", "Ab", "Db", "Gb"]
 GOLDEN_DIR = os.path.join(os.path.dirname(__file__), "golden")
@@ -52,7 +56,8 @@ def _golden_module():
 
 
 def test_bach_chorale_voicing_matches_the_golden_corpus_byte_for_byte():
-    """Pinned on main before the masters refactor: every case's full JSON output must be unchanged."""
+    """Pinned on main before the masters refactor (regenerated once, on purpose, for the
+    melodic-augmented-interval rule): every case's full JSON output must be unchanged."""
     gold = _golden_module()
     with open(gold.GOLDEN, encoding="utf-8") as fh:
         text = fh.read()
@@ -435,6 +440,217 @@ def test_voicings_input():
     assert check_voice_leading(voicings=[["C4", "E4", "G4"], ["D4", "F4", "A4"]])["violations"]  # parallel triads
 
 
+# ------------------------------------------------ regression tests (review findings)
+
+def test_augmented_sixths_are_not_dominant_sevenths():
+    """Finding 11/41: the #4 of It6/Ger65 (F# over Ab) rises; it is no seventh of Ab7 that must fall."""
+    ger = check_voice_leading(voicings=[["C5", "F#4", "Eb4", "Ab3"], ["C5", "G4", "E4", "G3"]], root="C")
+    it6 = check_voice_leading(voicings=[["C5", "F#4", "C4", "Ab2"], ["B4", "G4", "D4", "G2"]], root="C")
+    fr = check_voice_leading(voicings=[["F#4", "D4", "C4", "Ab2"], ["G4", "E4", "C4", "G2"]], root="C")
+    two = check_voice_leading(voices=[["F#4", "G4"], ["C4", "B3"], ["Ab2", "G2"]], root="C")
+    for r in (ger, it6, fr, two):
+        assert r["valid"] and r["warnings"] == [], r
+    # the wrong way round: the #4 falls (bach_chorale_voicing used to write F#4 -> E4)
+    wrong = check_voice_leading(voices=[["G4", "A4", "F#4", "E4"], ["C4", "C4", "C4", "C4"],
+                                        ["E3", "F3", "Eb3", "G3"], ["C3", "F2", "Ab2", "G2"]], root="C")
+    assert _rows(wrong["violations"]) == [(3, [0], "augmented_sixth")]
+    assert "does not rise a semitone" in wrong["violations"][0]["message"]
+    falls = check_voice_leading(voicings=[["C5", "F#4", "Eb4", "Ab3"], ["C5", "G4", "E4", "Bb3"]], root="C")
+    assert (1, [3], "augmented_sixth") in _rows(falls["violations"])       # b6 must fall to ^5
+    # a genuinely spelled Ab7 still resolves its seventh (Gb) down
+    ab7 = check_voice_leading(voicings=[["Gb4", "Eb4", "C4", "Ab2"], ["G4", "F4", "Db4", "Db3"]], root="Db")
+    assert _rows(ab7["violations"]) == [(1, [0], "seventh_resolution")]
+    # C7b5 with C in the bass is a V7b5 of F, not a French sixth of Bb
+    v7b5 = check_voice_leading(voicings=[["Bb4", "Gb4", "E4", "C3"], ["A4", "F4", "C4", "F3"]], root="F")
+    assert v7b5["valid"] and _rows(v7b5["warnings"]) == [(1, [2], "leading_tone")]
+
+
+def test_readme_augmented_sixth_chain_is_clean():
+    sy = roman_to_chords("i iv N6 Ger65 Cad64 V7 i", "D", "natural minor")["symbols"]
+    b = bach_chorale_voicing(sy, root="D", scale_type="harmonic minor")
+    assert b["rule_breaks"] == []
+    assert b["voices"]["alto"][3:5] == ["G#4", "A4"] and b["voices"]["bass"][3:5] == ["Bb3", "A3"]
+    r = check_voice_leading(voices=b["render_hint"]["tracks"], root="D", scale_type="harmonic minor")
+    assert r["valid"], r["violations"]
+    major = bach_chorale_voicing(roman_to_chords("I IV Ger65 Cad64 V7 I", "C")["symbols"], root="C")
+    assert major["voices"]["soprano"][2:4] == ["F#4", "G4"] and major["rule_breaks"] == []
+
+
+_AUG6_MAJOR = ["I IV It6 V I", "I IV Ger65 Cad64 V7 I", "I ii6 Fr43 V I", "I IV Sw43 Cad64 V I", "I vi It6 V7 I"]
+_AUG6_MINOR = ["i iv It6 V i", "i iv Ger65 Cad64 V7 i", "i ii°6 Fr43 V i", "i iv N6 Ger65 Cad64 V7 i",
+               "i VI Ger65 V i"]
+
+
+@pytest.mark.parametrize("tonic", TONICS)
+def test_augmented_sixths_resolve_outward_in_every_key(tonic):
+    for scale, progressions in (("major", _AUG6_MAJOR), ("harmonic minor", _AUG6_MINOR)):
+        for numerals in progressions:
+            sy = roman_to_chords(numerals, tonic, scale)["symbols"]
+            b = bach_chorale_voicing(sy, root=tonic, scale_type=scale)
+            assert b["rule_breaks"] == [], (tonic, numerals, b["rule_breaks"])
+            r = check_voice_leading(voices=b["render_hint"]["tracks"], root=tonic, scale_type=scale)
+            assert r["valid"], (tonic, numerals, r["violations"])
+            k = next(i for i, s in enumerate(sy) if isinstance(s, list))
+            here = [parse_note(b["chords"][k][v]) for v in _VOICES]
+            there = [parse_note(b["chords"][k + 1][v]) for v in _VOICES]
+            low, high = _augmented_sixth(here, here[3])
+            for a, c in zip(here, there):          # #4 up a semitone, b6 down a semitone
+                if a.without_octave() == high:
+                    assert c.midi - a.midi == 1, (tonic, numerals, a.name, c.name)
+                if a.without_octave() == low:
+                    assert c.midi - a.midi == -1, (tonic, numerals, a.name, c.name)
+
+
+def test_two_voice_dyads_are_not_power_or_sus_chords():
+    """Finding 12: a bare octave, a second or an open fifth is no chord for the key rules."""
+    assert _slice_chord([parse_note("B3"), parse_note("B4")]) is None
+    assert _slice_chord([parse_note("B3"), parse_note("A4")]) is None
+    assert _slice_chord([parse_note("G3"), parse_note("F4")]) is None
+    root, ctype = _slice_chord([parse_note("B3"), parse_note("D4")], {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7,
+                                                                       "A": 9, "B": 11})
+    assert (root.name, ctype.name) == ("B", "diminished")                 # the key's fifth: vii°
+    root, ctype = _slice_chord([parse_note("G2"), parse_note("B3"), parse_note("F4")])
+    assert (root.name, ctype.name) == ("G", "dominant 7")                 # an omitted fifth still reads
+    r = check_voice_leading(voices=[["G4", "A4", "G4"], ["B3", "B3", "C4"]], root="C")
+    assert r["valid"]                                                     # a neighbour over a held B
+    cf = cantus_firmus("C", "major", 10, 2)["notes"]
+    two = species_counterpoint(cf, "C", "major", 2, "above")
+    rules = {v["rule"] for v in check_voice_leading(voices=two["render_hint"]["tracks"], root="C")["violations"]}
+    assert "doubled_leading_tone" not in rules and "leading_tone" not in rules
+    held = check_voice_leading(voices=[["B4", "B4"], ["G4", "G4"], ["D4", "E4"], ["G2", "C3"]], root="C")
+    assert held["valid"]                                                  # V -> Imaj7 keeps B
+    # a bare octave or open fifth on the TONIC still takes the leading tone (Fux's cadence)
+    assert check_voice_leading(voices=[["B4", "C5"], ["D4", "C4"]], root="C")["valid"]
+    octave = check_voice_leading(voices=[["D5", "C5"], ["B3", "C3"]], root="C")
+    assert _rows(octave["violations"]) == [(1, [1], "leading_tone")]
+    assert "tonic of C (octave)" in octave["violations"][0]["message"]
+    assert check_voice_leading(voices=[["B4", "A4"], ["D4", "A3"]], root="C")["valid"]   # an A octave is no vi
+
+
+@pytest.mark.parametrize("tonic", TONICS)
+def test_species_counterpoint_key_rules_read_real_chords(tonic):
+    for variant, species, position in itertools.product(range(2), range(1, 6), ("above", "below")):
+        cf = cantus_firmus(tonic, "major", 10, variant)["notes"]
+        r = species_counterpoint(cf, tonic, "major", species, position)
+        if r.get("rules_broken") or "warning" in r:
+            continue
+        for v in check_voice_leading(voices=r["render_hint"]["tracks"], root=tonic)["violations"]:
+            assert v["rule"] != "doubled_leading_tone", (tonic, variant, species, position, v)
+            if v["rule"] == "leading_tone":   # V/vii° read as real triads; a bare arrival only on ^1
+                before, after = re.search(r"leading tone of (\S+) does not rise to the tonic of (.+)$",
+                                          v["message"]).groups()
+                assert not re.fullmatch(r"[A-G][#b]*(5|sus\d)", before), v
+                if re.fullmatch(r"[A-G][#b]*(5|sus\d| \(octave\))", after):
+                    assert after.startswith(tonic) and after[len(tonic):len(tonic) + 1] in ("5", "s", " "), v
+
+
+def test_passing_leading_tone_in_a_descending_bass():
+    """Finding 13/56: I V6 vi (bass 1-7-6, the Romanesca) is no leading-tone fault."""
+    r = check_voice_leading(voices=[["G4", "G4", "A4"], ["E4", "D4", "C4"], ["G3", "G3", "E3"], ["C3", "B2", "A2"]],
+                            root="C")
+    assert r["valid"] and r["warnings"] == []
+    for chords in ("C G/B F/A G", "C G/B Am G"):                          # the same bass under IV6 and vi
+        b = bach_chorale_voicing(chords, root="C")
+        assert b["voices"]["bass"][:3] == ["C3", "B2", "A2"] and b["rule_breaks"] == []
+        assert check_voice_leading(voices=b["render_hint"]["tracks"], root="C")["valid"], chords
+    leap = check_voice_leading(voices=[["G4", "G4", "A4"], ["E4", "D4", "C4"], ["B3", "G3", "E3"],
+                                       ["E3", "B2", "A2"]], root="C")
+    assert (2, [3], "leading_tone") in _rows(leap["violations"])          # ^7 leapt into: no passing tone
+    sop = check_voice_leading(voices=[["C5", "B4", "A4"], ["G4", "G4", "E4"], ["E4", "D4", "C4"], ["C3", "G2", "A2"]],
+                              root="C")
+    assert (2, [0], "leading_tone") in _rows(sop["violations"])           # the soprano rule stays
+
+
+@pytest.mark.parametrize("tonic", TONICS)
+def test_library_schemas_voiced_by_bach_pass_the_checker(tonic):
+    """Findings 13/56 and 59: romanesca, lament and andalusian come back clean in every key."""
+    for name in ("romanesca", "lament", "andalusian"):
+        pl = progression_library(name, root=tonic)
+        scale = pl["key"].split(" ", 1)[1]
+        b = bach_chorale_voicing(pl["chords"], root=tonic, scale_type=scale)
+        assert b["rule_breaks"] == [], (name, tonic, b["rule_breaks"])
+        r = check_voice_leading(voices=b["render_hint"]["tracks"], root=tonic, scale_type=scale)
+        assert r["valid"], (name, tonic, r["violations"])
+
+
+def test_direct_fifths_from_an_enharmonic_interval():
+    """Finding 14: a d6 (seven semitones) into a spelled P5 with a leap is a direct fifth (music21)."""
+    r = check_voice_leading(voices=[["Ab4", "C5"], ["C#4", "F4"]])
+    assert _rows(r["violations"]) == [(1, [0, 1], "direct_fifths")]
+    r = check_voice_leading(voices=[["B#4", "E5"], ["C4", "E4"]])
+    assert _rows(r["violations"]) == [(1, [0, 1], "direct_octaves")]
+    stepped = check_voice_leading(voices=[["Ab4", "Bb4"], ["C#4", "Eb4"]])
+    assert stepped["valid"]                                               # the soprano steps: allowed
+    true_parallel = check_voice_leading(voices=[["C5", "E5"], ["F4", "A4"]])
+    assert _rows(true_parallel["violations"]) == [(1, [0, 1], "parallel_fifths")]
+
+
+@pytest.mark.parametrize("tonic", TONICS)
+def test_direct_fifths_from_an_enharmonic_interval_in_every_key(tonic):
+    for voices, rule in (([["Ab4", "C5"], ["C#4", "F4"]], "direct_fifths"),
+                         ([["B#4", "E5"], ["C4", "E4"]], "direct_octaves")):
+        moved = [[_shift(n, tonic, near=True) for n in v] for v in voices]
+        assert _rows(check_voice_leading(voices=moved)["violations"]) == [(1, [0, 1], rule)], (tonic, moved)
+
+
+def test_secondary_dominant_on_the_seventh_degree_may_double_its_root():
+    """Finding 16: B D# F# (V/iii in C) doubles its root B; only V and vii° hold a leading tone."""
+    r = check_voice_leading(voicings=[["B4", "F#4", "D#4", "B2"], ["B4", "G4", "E4", "E3"]], root="C")
+    assert r["valid"]
+    assert check_voice_leading(voicings=[["B4", "F#4", "D#4", "B2"], ["B4", "G4", "E4", "E3"]], root="E")["valid"]
+    dim = check_voice_leading(voices=[["B4"], ["F4"], ["D4"], ["B2"]], root="C")
+    assert _rows(dim["violations"]) == [(0, [0, 3], "doubled_leading_tone")]  # vii° still counts
+
+
+@pytest.mark.parametrize("tonic", TONICS)
+def test_secondary_dominant_on_the_seventh_degree_in_every_key(tonic):
+    moved = [[_shift(n, tonic, near=True) for n in ch] for ch in (["B4", "F#4", "D#4", "B2"], ["B4", "G4", "E4", "E3"])]
+    assert check_voice_leading(voicings=moved, root=tonic)["valid"], (tonic, moved)
+    dim = [[_shift(n, tonic, near=True)] for n in ("B4", "F4", "D4", "B2")]
+    assert _rows(check_voice_leading(voices=dim, root=tonic)["violations"]) == [(0, [0, 3], "doubled_leading_tone")]
+
+
+def test_voicings_of_different_sizes_are_aligned():
+    """Finding 51: voice_leading / voice_chords output mixing triads and sevenths goes in as is."""
+    vl = voice_leading(["C", "F", "G7", "C"])["chords"]
+    r = check_voice_leading(voicings=vl, root="C")
+    assert len(r["voice_order"]) == 4 and len(r["slices"]) == 4
+    assert all(sum(n is not None for n in s["notes"]) == len(c) for s, c in zip(r["slices"], vl))
+    g7_to_c = check_voice_leading(voicings=[["G4", "F4", "D4", "B3"], ["G4", "E4", "C4"]], root="C")
+    assert g7_to_c["slices"][1]["notes"] == ["G4", "E4", None, "C4"]     # F falls to E, B rises to C
+    assert g7_to_c["valid"]
+    bad = check_voice_leading(voicings=[["G4", "F4", "D4", "B3"], ["A4", "E4", "C4"]], root="C")
+    assert bad["valid"]                                                   # G -> A: no seventh or LT fault
+    drop2 = check_voice_leading(voicings=voice_chords(["C", "G/B", "C"], "drop2")["chords"])
+    assert len(drop2["voice_order"]) == 5
+
+
+@pytest.mark.parametrize("tonic", TONICS)
+def test_voice_leading_chains_into_voicings_in_every_key(tonic):
+    for numerals in ("I V7 I", "I IV V7 I", "ii7 V7 I", "I V65 I", "I vi ii V7 I"):
+        symbols = roman_to_chords(numerals, tonic)["symbols"]
+        for voiced in (voice_leading(symbols)["chords"], voice_chords(symbols, "drop2")["chords"],
+                       voice_chords(symbols, "close")["chords"]):
+            r = check_voice_leading(voicings=voiced, root=tonic)
+            assert [sum(n is not None for n in s["notes"]) for s in r["slices"]] == [len(c) for c in voiced]
+
+
+def test_bach_avoids_the_melodic_augmented_second():
+    """Finding 59: iv6 -> V and VI -> V in minor no longer write b6 -> #7 as an A2."""
+    lament = bach_chorale_voicing(["Cm", "Gm/Bb", "Fm/Ab", "G"], root="C", scale_type="natural minor")
+    assert lament["voices"]["alto"] == ["C4", "D4", "C4", "B3"] and lament["rule_breaks"] == []
+    for chords, tonic in ((["Am", "F", "E", "Am"], "A"), (["Cm", "Ab", "G", "Cm"], "C")):
+        b = bach_chorale_voicing(chords, root=tonic, scale_type="harmonic minor")
+        assert b["rule_breaks"] == []
+        r = check_voice_leading(voices=b["render_hint"]["tracks"], root=tonic, scale_type="harmonic minor")
+        assert "melodic_augmented" not in {v["rule"] for v in r["violations"]}
+    # when the melody forces it, the A2 is reported, never silent
+    forced = bach_chorale_voicing(["Am", "Dm", "E", "Am"], root="A", scale_type="harmonic minor",
+                                  melody=["C5", "F4", "G#4", "A4"])
+    assert {"chord": 3, "rule": "melodic augmented second in the soprano"} in forced["rule_breaks"]
+    assert _melodic_augmented("Ab3", "B3") == "augmented second" and _melodic_augmented("C4", "C#4") is None
+
+
 @pytest.mark.parametrize("kwargs", [
     {},
     {"voices": [["C5"], ["C4"]], "voicings": [["C4", "E4"]]},
@@ -443,7 +659,7 @@ def test_voicings_input():
     {"voices": [["C5"]]},
     {"voices": [["C5"], {"type": "notes", "notes": ["C4"]}]},
     {"voices": [{"type": "chords", "chords": ["C"]}, {"type": "notes", "notes": ["C4"]}]},
-    {"voicings": [["C4", "E4"], ["C4", "E4", "G4"]]},
+    {"voicings": [["C4"], ["C4", "E4", "G4"]]},
     {"voicings": [["C", "E"]]},
     {"voices": [["C5"], ["C4"]], "root": "C", "scale_type": "major pentatonic"},
 ])
@@ -455,14 +671,16 @@ def test_check_voice_leading_rejects_bad_input(kwargs):
 # ---------------------------------------------------------------- properties
 
 _HARD = {"parallel_fifths", "parallel_octaves", "contrary_fifths", "contrary_octaves", "direct_fifths",
-         "direct_octaves", "voice_overlap", "voice_crossing"}
+         "direct_octaves", "voice_overlap", "voice_crossing", "melodic_augmented", "augmented_sixth"}
 _PROGRESSIONS = ["C Am F G7 C", "C F G7 C", "C Am Dm G7 C", "C F Bdim Em Am Dm G C", "C G Am Em F C F G",
-                 "C Dm7 G7 C", "C G/B Am C/G F G C", "C E7 Am D7 G7 C", "Cmaj7 Am7 Dm7 G7 C"]
+                 "C Dm7 G7 C", "C G/B Am C/G F G C", "C E7 Am D7 G7 C", "Cmaj7 Am7 Dm7 G7 C",
+                 "C G/B Am C/E", "C G/B Am Em/G F C/E Dm G C", "C F Fm/Ab G C", "C Am F G B7 Em"]
 
 
 @pytest.mark.parametrize("tonic", TONICS)
 def test_clean_chorales_pass_the_checker(tonic):
-    """Whenever bach_chorale_voicing reports no rule break, the checker agrees on the shared rules."""
+    """Whenever bach_chorale_voicing reports no rule break, the checker agrees on the shared rules
+    (the soprano leading tone, sevenths, augmented sixths and melodic augmented intervals too)."""
     for prog in _PROGRESSIONS:
         chords = [_shift_symbol(c, tonic) for c in prog.split()]
         b = bach_chorale_voicing(chords, root=tonic)

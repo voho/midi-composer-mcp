@@ -17,10 +17,13 @@ Every function is a deterministic application of the named rule set.
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 from .chords import CHORDS, chord_notes, parse_chord_symbol
-from .harmony import _root_and_quality
+from .harmony import _root_and_quality, interval_between
 from .midi_io import _parse_chord_list, _with_octave
 from .notes import Note, parse_note, parse_notes, spell_pitch_class, transpose
+from .roman import _is_above, _steps
 from .scales import resolve_scale_type, scale_notes
 
 # ------------------------------------------------------------ helpers
@@ -145,14 +148,47 @@ def _pcs_of(tones):
 
 
 def _roles(tones: list[Note]) -> tuple[int | None, int | None]:
-    """(fifth pc, seventh pc) of a chord, read from intervals above the root, not list positions."""
-    root = tones[0].pitch_class
-    rel = {(t.pitch_class - root) % 12: t.pitch_class for t in tones}
+    """(fifth pc, seventh pc) of a chord, read from intervals above the root, not list positions.
+
+    A minor or major seventh counts only when it is spelled as a seventh (on the 7th letter above
+    the root: the Gb of Ab7), so the F# of an augmented sixth (Ab C Eb F#, an A6 above Ab) is no
+    chord seventh — letters and semitones, not semitones alone."""
+    root = tones[0]
+    rel = {(t.pitch_class - root.pitch_class) % 12: t.pitch_class for t in tones}
     fifth = next((rel[i] for i in (7, 6, 8) if i in rel), None)
-    seventh = rel[10] if 10 in rel else rel.get(11)  # membership, not truthiness: C is pitch class 0
+    seventh = next((rel[i] for i in (10, 11) if any(
+        (t.pitch_class - root.pitch_class) % 12 == i and _steps(t, root) == 6 for t in tones)), None)
     if seventh is None and 9 in rel and 3 in rel and 6 in rel:  # the diminished seventh (bb7)
         seventh = rel[9]
     return fifth, seventh
+
+
+def _augmented_sixth(tones: list[Note], bass: Note) -> tuple[Note, Note] | None:
+    """(b6, #4) of an augmented-sixth chord, or None: read by spelling, in any key.
+
+    It6 (Ab C F# in C), Fr43 (+ D), Ger65 (+ Eb) and Sw43 (+ D#) put b6 in the bass (Ab), with the
+    major third above it (C) and the note an augmented sixth above it (the 6th letter, 10
+    semitones: F#, not the Gb seventh of Ab7) — roman.special_reading's reading, key-free, so an
+    applied augmented sixth counts too. Kostka & Payne, Aldwell & Schachter: the augmented sixth
+    expands to the octave on ^5 — the upper note (#4) rises a semitone, the bass (b6) falls a
+    semitone. (C E Gb Bb with C in the bass is a V7b5, not a French sixth.)
+    """
+    lo = bass.without_octave()
+    if not any(_is_above(t, lo, 4, 2) for t in tones):
+        return None
+    hi = next((t for t in tones if _is_above(t, lo, 10, 5)), None)
+    return (lo, hi.without_octave()) if hi is not None else None
+
+
+@lru_cache(maxsize=None)
+def _melodic_augmented(a: str, b: str) -> str | None:
+    """The name of the melodic interval a -> b (concrete pitches such as 'Ab3', 'B3') when it is
+    augmented — 'augmented second' (Ab–B), 'augmented fourth' (F–B) … — else None. The chromatic
+    A1 (C–C#) is fine (Kostka & Payne). Shared by bach_chorale_voicing and check_voice_leading."""
+    iv = interval_between(a, b)
+    if iv["quality"] in ("augmented", "doubly augmented") and iv["number"] != 1:
+        return iv["name"]
+    return None
 
 
 def _voicings(tones: list[Note], bass_pc: int, root_pc: int, avoid_double: set[int],
@@ -210,13 +246,19 @@ def _consecutive_perfect(p_hi: int, p_lo: int, c_hi: int, c_lo: int) -> tuple[st
     return None
 
 
+def _similar_leap(p_hi: int, p_lo: int, c_hi: int, c_lo: int) -> bool:
+    """Similar motion (both voices moving the same way) with the upper voice leaping (more than 2
+    semitones) — the motion of a direct (hidden) fifth or octave."""
+    return (c_hi - p_hi) * (c_lo - p_lo) > 0 and abs(c_hi - p_hi) > 2
+
+
 def _direct_perfect(p_hi: int, p_lo: int, c_hi: int, c_lo: int) -> bool:
     """A direct (hidden) fifth/octave: similar motion into a perfect fifth or octave (mod 12) from a
     different interval, with the upper voice leaping (more than 2 semitones). A true parallel is
-    _consecutive_perfect's case, not this one."""
+    _consecutive_perfect's case, not this one. (check_voice_leading judges 'a different interval'
+    by spelling instead: a d6 moving to a P5 is a direct fifth.)"""
     outer = abs(c_hi - c_lo) % 12
-    return (outer in (0, 7) and abs(p_hi - p_lo) % 12 != outer
-            and (c_hi - p_hi) * (c_lo - p_lo) > 0 and abs(c_hi - p_hi) > 2)
+    return outer in (0, 7) and abs(p_hi - p_lo) % 12 != outer and _similar_leap(p_hi, p_lo, c_hi, c_lo)
 
 
 def _overlap(p_hi: int, p_lo: int, c_hi: int, c_lo: int) -> bool:
@@ -242,8 +284,12 @@ def _pair_parallels(prev, cur) -> list[str]:
     return bad
 
 
-def _transition_faults(prev, cur, leading_pc, tonic_pc, prev_seventh_pc) -> tuple[list[str], int]:
-    """Hard faults (rule breaks) and a style cost for moving from one SATB chord to the next."""
+def _transition_faults(prev, cur, leading_pc, tonic_pc, prev_seventh_pc, prev_aug6=None,
+                       names=None) -> tuple[list[str], int]:
+    """Hard faults (rule breaks) and a style cost for moving from one SATB chord to the next.
+
+    `prev_aug6`: the (b6, #4) pitch classes when the first chord is an augmented sixth. `names`: a
+    pair of {midi: spelled name} maps for the two chords, for the melodic-augmented-interval rule."""
     faults = _pair_parallels(prev, cur)
     # direct (hidden) fifths/octaves in the outer voices with a leap in the soprano
     if _direct_perfect(prev[0], prev[3], cur[0], cur[3]):
@@ -261,6 +307,24 @@ def _transition_faults(prev, cur, leading_pc, tonic_pc, prev_seventh_pc) -> tupl
         for i in range(4):
             if prev[i] % 12 == prev_seventh_pc and not (1 <= prev[i] - cur[i] <= 2) and cur[i] != prev[i]:
                 faults.append(f"the seventh in the {_VOICES[i]} does not resolve down by step")
+    # an augmented sixth expands to the octave on ^5: #4 rises a semitone, b6 falls a semitone
+    if prev_aug6 is not None:
+        low_pc, high_pc = prev_aug6
+        for i in range(4):
+            if cur[i] == prev[i]:
+                continue   # held, like a held seventh
+            if prev[i] % 12 == high_pc and cur[i] != prev[i] + 1:
+                faults.append(f"the augmented sixth's upper note (#4) in the {_VOICES[i]} does not rise a semitone")
+            elif prev[i] % 12 == low_pc and cur[i] != prev[i] - 1:
+                faults.append(f"the augmented sixth's lower note (b6) in the {_VOICES[i]} does not fall a semitone")
+    # no melodic augmented interval (A2, A4 …) in any voice, judged by the spelled notes
+    if names is not None:
+        before, after = names
+        for i in range(4):
+            if cur[i] != prev[i]:
+                aug = _melodic_augmented(before[prev[i]], after[cur[i]])
+                if aug is not None:
+                    faults.append(f"melodic {aug} in the {_VOICES[i]}")
     cost = abs(cur[1] - prev[1]) * 2 + abs(cur[2] - prev[2]) * 2 + abs(cur[0] - prev[0]) + abs(cur[3] - prev[3]) // 2
     cost += sum(3 for i in range(3) if abs(cur[i] - prev[i]) > 4)  # inner-voice leaps
     return faults, cost
@@ -274,13 +338,19 @@ def bach_chorale_voicing(chords, root: str | None = None, scale_type: str = "maj
     twelfth; every chord tone present (a seventh chord may drop its fifth); the
     bass takes the chord root, or the slash bass ('C/E'; a note array's first
     note when it is not the root); never double the leading tone or a chord
-    seventh; no parallel fifths or octaves between any two voices, nor
+    seventh (spelled as a seventh: the F# of Ab C Eb F# is no seventh) or an
+    augmented-sixth tone; no parallel fifths or octaves between any two voices, nor
     consecutive ones by contrary motion (the strict textbook rule; Bach himself
     occasionally allows contrary octaves at a cadence); no direct
     fifths/octaves in the outer voices with a soprano
-    leap; no voice overlap; a soprano leading tone rises to the tonic; a chord
-    seventh resolves down by step. Among the voicings that obey all rules the
-    one with the smoothest inner voices wins (an exact search). Pass the key
+    leap; no voice overlap; no melodic augmented interval (A2, A4 — the
+    b6→#7 step in minor; Kostka & Payne), judged by the spelled notes; a
+    soprano leading tone rises to the tonic; a chord seventh resolves down by
+    step; an augmented sixth (It6, Fr43, Ger65, Sw43: b6 in the bass with the
+    note an augmented sixth above it, Ab–F# in C, read by spelling) expands
+    to the octave on ^5, #4 rising and b6 falling a semitone (Kostka & Payne;
+    Aldwell & Schachter). Among the voicings that obey all rules the one with
+    the smoothest inner voices wins (an exact search). Pass the key
     (`root`) for the leading-tone rule. Pass `melody` (one note per chord) to
     harmonize a chorale tune: the soprano then sings exactly that melody, and
     each chord must contain its melody note. Returns the four voices, per-chord SATB
@@ -318,16 +388,26 @@ def bach_chorale_voicing(chords, root: str | None = None, scale_type: str = "maj
             not any((t.pitch_class - tonic.pitch_class) % 12 == 4 for t in last)
         key_label = f"{tonic.name} {'minor' if minor else 'major'} (from the final chord)"
     leading_pc = (tonic.pitch_class - 1) % 12
-    cands, sevenths = [], []
+    cands, sevenths, aug6s, spelled = [], [], [], []
     big = 1000
     for k, ch in enumerate(parsed):
         tones = [t.without_octave() for t in ch["tones"]]
         bass = ch["bass"] or tones[0]
         fifth_pc, seventh_pc = _roles(tones)
         if (seventh_pc is None and bass.pitch_class not in {t.pitch_class for t in tones}
-                and (bass.pitch_class - tones[0].pitch_class) % 12 in (10, 11)):
+                and (bass.pitch_class - tones[0].pitch_class) % 12 in (10, 11)
+                and _steps(bass.without_octave(), tones[0]) == 6):
             seventh_pc = bass.pitch_class  # a slash bass on the seventh (Am/G) is a seventh too
-        avoid = {leading_pc} | ({seventh_pc} if seventh_pc is not None else set())
+        aug6 = _augmented_sixth(tones, bass)
+        aug6_pcs = (aug6[0].pitch_class, aug6[1].pitch_class) if aug6 is not None else None
+        avoid = {leading_pc} | ({seventh_pc} if seventh_pc is not None else set()) | set(aug6_pcs or ())
+        # every MIDI note a voice may sing in this chord, spelled as the chord writes it
+        tone_names = tones + ([ch["bass"].without_octave()] if ch["bass"] else [])
+        by_pc = {}
+        for t in tone_names:
+            by_pc.setdefault(t.pitch_class, t)
+        spelled.append({m: _with_octave(by_pc[m % 12], m).name
+                        for m in range(RANGES["bass"][0], RANGES["soprano"][1] + 1) if m % 12 in by_pc})
         pin = sop[k].midi if sop is not None else None
         options = _voicings(tones, bass.pitch_class, tones[0].pitch_class, set(), pin)
         if not options:
@@ -342,24 +422,29 @@ def bach_chorale_voicing(chords, root: str | None = None, scale_type: str = "maj
             raise ValueError(f"no four-part voicing of {label} fits the SATB ranges"
                              + (" with that melody note" if pin is not None else ""))
 
-        def doubling(v, tones=tones, fifth_pc=fifth_pc, avoid=avoid):
+        def doubling(v, tones=tones, fifth_pc=fifth_pc, avoid=avoid, seventh_pc=seventh_pc):
             """(style cost, faults): prefer doubling the root, then the fifth; a doubled leading
-            tone or seventh is a rule break, reported if the search cannot avoid it."""
+            tone, seventh or augmented-sixth tone is a rule break, reported if the search cannot
+            avoid it."""
             voices = [x % 12 for x in v]
             doubled = [pc for pc in set(voices) if voices.count(pc) > 1]
-            faults = [f"doubled {'leading tone' if pc == leading_pc else 'seventh'}" for pc in doubled if pc in avoid]
+            role = {pc: "augmented-sixth tone" for pc in avoid} | {seventh_pc: "seventh", leading_pc: "leading tone"}
+            faults = [f"doubled {role[pc]}" for pc in doubled if pc in avoid]
             cost = 0 if doubled == [tones[0].pitch_class] else 2 if doubled == [fifth_pc] else 4 if doubled else 1
             return cost + big * len(faults), faults
         cands.append([(v, *doubling(v)) for v in options])
         sevenths.append(seventh_pc)
+        aug6s.append(aug6_pcs)
     # Viterbi over voicings
     layer = {v: (dc + abs(v[0] - 72) // 3, [v], [(0, x) for x in df]) for v, dc, df in cands[0]}
     for k in range(1, len(cands)):
         nxt = {}
+        same = {m % 12 for m in spelled[k - 1]} == {m % 12 for m in spelled[k]}   # the harmony goes on
         for v, dc, df in cands[k]:
             best = None
             for pv, (cost, path, faults) in layer.items():
-                f, c = _transition_faults(pv, v, leading_pc, tonic.pitch_class, sevenths[k - 1])
+                f, c = _transition_faults(pv, v, leading_pc, tonic.pitch_class, sevenths[k - 1],
+                                          None if same else aug6s[k - 1], (spelled[k - 1], spelled[k]))
                 total = cost + c + dc + big * len(f)
                 if best is None or total < best[0]:
                     best = (total, path + [v], faults + [(k, x) for x in f] + [(k, x) for x in df])
@@ -367,16 +452,9 @@ def bach_chorale_voicing(chords, root: str | None = None, scale_type: str = "maj
         layer = nxt
     total, path, faults = min(layer.values(), key=lambda t: (t[0], t[1]))
 
-    def name(m, tone_names):
-        pc = m % 12
-        spelled = next((t for t in tone_names if t.pitch_class == pc), None) or spell_pitch_class(pc)
-        return _with_octave(spelled, m).name
-
     rows = []
-    for ch, v in zip(parsed, path):
-        tones = [t.without_octave() for t in ch["tones"]] + ([ch["bass"].without_octave()] if ch["bass"] else [])
-        rows.append({"symbol": ch["symbol"] or ch["label"],
-                     **{voice: name(m, tones) for voice, m in zip(_VOICES, v)}})
+    for ch, names, v in zip(parsed, spelled, path):   # each note spelled as its chord writes it
+        rows.append({"symbol": ch["symbol"] or ch["label"], **{voice: names[m] for voice, m in zip(_VOICES, v)}})
     voices = {voice: [r[voice] for r in rows] for voice in _VOICES}
     return {
         "key": key_label,
