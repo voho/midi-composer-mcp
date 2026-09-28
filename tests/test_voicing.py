@@ -17,7 +17,7 @@ from midi_composer_mcp.diatonic import degrees_to_chords, diatonic_chords
 from midi_composer_mcp.harmony import _voicing_cost, voice_leading
 from midi_composer_mcp.midi_io import _parse_chord_list, render_arrangement, render_chords
 from midi_composer_mcp.notes import LETTERS, parse_note, transpose
-from midi_composer_mcp.voicing import STYLES, _greedy, _read, voice_chords
+from midi_composer_mcp.voicing import STYLES, _candidates, _greedy, _read, _shell_members, voice_chords
 
 TONICS = ["C", "G", "D", "A", "E", "B", "F#", "C#", "F", "Bb", "Eb", "Ab", "Db", "Gb"]
 
@@ -48,6 +48,24 @@ def test_levine_rootless_ii_v_i():
     assert r["total_movement"] == 1 + 5
 
 
+def test_auto_rootless_starts_on_b_where_levines_register_asks():
+    """Levine's ii-V-I alternates A-B-A or B-A-B by register. In A major the A-start would run
+    A-B-B (the V's 7th leaps instead of falling to the I's 3rd); the B-start alternates."""
+    r = voice_chords(["Bm7", "E7", "Amaj7"], "rootless")
+    assert r["chords"] == [["A3", "C#4", "D4", "F#4"], ["G#3", "C#4", "D4", "F#4"], ["G#3", "B3", "C#4", "E4"]]
+    assert [v["variant"] for v in r["voicings"]] == ["B", "A", "B"] and r["total_movement"] == 6
+    r = voice_chords(["Cm7b5", "F7b9", "Bbm6"], "rootless")
+    assert [v["variant"] for v in r["voicings"]] == ["B", "A", "B"] and r["total_movement"] == 10
+    # a longer chain: the B start alternates all the way (total 25; the A start broke at IV, 39)
+    r = voice_chords(["Cm7", "F7", "Bbmaj7", "Ebmaj7", "Am7b5", "D7b9", "Gm6"], "rootless")
+    assert [v["variant"] for v in r["voicings"]] == ["B", "A", "B", "A", "B", "A", "B"]
+    assert r["total_movement"] == 25
+    # a tie keeps the A start (the C-major textbook example), and connect=False stays on A
+    assert [v["variant"] for v in voice_chords(["Dm7", "G7", "Cmaj7"], "rootless")["voicings"]] == ["A", "B", "A"]
+    r = voice_chords(["Bm7", "E7", "Amaj7"], "rootless", connect=False)
+    assert [v["variant"] for v in r["voicings"]] == ["A", "A", "A"]
+
+
 def test_drop_voicings_of_cmaj7():
     assert _notes(["Cmaj7"], "drop2") == [["G3", "C4", "E4", "B4"]]
     assert _notes(["Cmaj7"], "drop3") == [["E3", "C4", "G4", "B4"]]
@@ -65,6 +83,34 @@ def test_close_is_voice_leading():
             assert _notes(chords, "close", octave=octave) == voice_leading(chords, octave=octave)["chords"]
 
 
+def test_close_variant_names_the_rotation_actually_stacked():
+    """A doubled tone is not mistaken for its first occurrence: F3 F4 A4 C5 is F-F-A-C, rotation 3,
+    whether the delegated voice_leading path or the replicated search voices it."""
+    chords = [["C", "E", "G", "C"], ["F", "A", "C", "F"]]
+    plain = voice_chords(chords, "close")["voicings"]
+    melody = voice_chords(chords, "close", top_notes=["C", "C"])["voicings"]
+    assert [v["notes"] for v in plain] == [v["notes"] for v in melody] == [["C4", "E4", "G4", "C5"],
+                                                                         ["F3", "F4", "A4", "C5"]]
+    assert [v["variant"] for v in plain] == [v["variant"] for v in melody] == ["rotation 0", "rotation 3"]
+
+
+def test_close_at_the_top_of_midi_voices_one_chord_the_same_with_or_without_connect():
+    """connect only governs the 2nd and later chords. voice_leading never shifts its first chord and
+    raises where it would leave MIDI 0-127; 'close' then starts the same search from an in-range
+    octave, and rotation 0 (an octave down) wins over a higher rotation in place."""
+    with pytest.raises(ValueError):
+        voice_leading(["Cmaj7"], octave=9)
+    for connect in (True, False):
+        assert _notes(["Cmaj7"], "close", octave=9, connect=connect) == [["C8", "E8", "G8", "B8"]]
+        v = voice_chords(["Bmaj7"], "close", octave=8, connect=connect)["voicings"][0]
+        assert (v["notes"], v["variant"]) == (["B7", "D#8", "F#8", "A#8"], "rotation 0")
+        v = voice_chords(["Bmaj7"], "drop2", octave=8, connect=connect)["voicings"][0]
+        assert (v["notes"], v["variant"]) == (["F#7", "B7", "D#8", "A#8"], "rotation 0")
+    # further chords still follow voice_leading's search from there
+    r = voice_chords(["Cmaj7", "Fmaj7"], "close", octave=9)
+    assert r["chords"][0] == ["C8", "E8", "G8", "B8"] and all(m <= 127 for m in r["voicings"][1]["midi"])
+
+
 def test_replicated_search_matches_voice_leading():
     """The greedy search used for top_notes and every other style IS voice_leading's search."""
     corpus = [["C", "G", "Am", "F", "C/E", "Dm7", "G7", "C"], ["Cmaj9", "A7b9", "Dm11", "G13", "Cmaj7#11"],
@@ -78,9 +124,69 @@ def test_replicated_search_matches_voice_leading():
 
 
 def test_rootless_rejects_triads_sus_and_dim7():
-    for chord in ("C", "Cm", "Csus4", "C7sus4", "Cdim7", "Cadd9", "C5"):
+    for chord in ("C", "Cm", "Csus4", "C7sus4", "Cdim7", "Cadd9", "C5", "C11"):
         with pytest.raises(ValueError):
             voice_chords([chord], "rootless")
+
+
+def test_rootless_keeps_the_chords_own_tensions():
+    """No tension the symbol names is dropped: #11 (= b5) takes the dominant's 13 slot like an
+    altered 5th, and a named #11 / 11 / 13 takes the 5th's slot on major and minor chords."""
+    def form(sym, style="rootless_a"):
+        v = voice_chords([sym], style)["voicings"][0]
+        return v["notes"], v["degrees"]
+
+    assert form("C7#11") == (["E3", "F#3", "Bb3", "D4"], ["3", "#11", "b7", "9"])
+    assert form("C7#11", "rootless_b") == (["Bb3", "D4", "E4", "F#4"], ["b7", "9", "3", "#11"])
+    assert form("C7b5") == (["E3", "Gb3", "Bb3", "D4"], ["3", "b5", "b7", "9"])   # the same sound
+    assert form("C13") == (["E3", "A3", "Bb3", "D4"], ["3", "13", "b7", "9"])
+    assert form("Cmaj7#11") == (["E3", "F#3", "B3", "D4"], ["3", "#11", "7", "9"])
+    assert form("Cmaj7#11", "rootless_b") == (["B3", "D4", "E4", "F#4"], ["7", "9", "3", "#11"])
+    assert form("Cmaj13") == (["E3", "A3", "B3", "D4"], ["3", "13", "7", "9"])
+    assert form("Cm11") == (["Eb3", "F3", "Bb3", "D4"], ["b3", "11", "b7", "9"])
+    assert form("Cm13", "rootless_b") == (["Bb3", "D4", "Eb4", "A4"], ["b7", "9", "b3", "13"])
+    assert form("Cmaj9")[1] == ["3", "5", "7", "9"] and form("Cm9")[1] == ["b3", "5", "b7", "9"]
+    assert form("Cmaj7#5")[1] == ["3", "#5", "7", "9"]            # an altered 5th is itself kept
+    # the tension-bearing symbols no longer collapse onto the plain 9th/13th voicing
+    assert len({tuple(form(s)[0]) for s in ("C7#11", "C13", "Cmaj7#11", "Cmaj13", "Cmaj9")}) == 5
+    # a dominant 11th is a sus sound (Levine: C11 = C7sus4), refused like the other sus chords
+    with pytest.raises(ValueError, match="sus"):
+        voice_chords(["C11"], "rootless_a")
+    assert voice_chords(["C11"], "drop2")["voicings"][0]["degrees"].count("11") == 1   # other styles keep it
+
+
+def test_shell_slash_chords_keep_the_root_and_never_double_the_bass():
+    """A slash bass goes under the whole R-3-7 shell minus the member it already is (Levine's shells
+    are defined by the root): C/E is never E-E-G and Dm7/C never C-F-C."""
+    def a(sym):
+        return voice_chords([sym], "shell", connect=False)["voicings"][0]
+
+    assert (a("C/E")["notes"], a("C/E")["degrees"]) == (["E3", "C4", "G4"], ["3", "1", "5"])
+    assert a("G7/B")["notes"] == ["B3", "G4", "F5"]
+    assert a("Dm7/C")["notes"] == ["C3", "D3", "F3"]
+    assert a("Am7/G")["notes"] == ["G3", "A3", "C4"]
+    assert a("Cmaj7/B")["notes"] == ["B3", "C4", "E4"]
+    assert a("C/G")["notes"] == ["G3", "C4", "E4"]
+    assert a("Bdim/D")["notes"] == ["D3", "B3", "F4"]
+    # a bass that is no shell member (a 7th chord's 5th, a foreign note) sits under all of R-3-7
+    assert (a("Dm7/A")["notes"], a("Dm7/A")["degrees"]) == (["A3", "D4", "F4", "C5"], ["5", "1", "b3", "b7"])
+    assert (a("F/G")["notes"], a("F/G")["degrees"]) == (["G3", "F4", "A4", "C5"], ["bass", "1", "3", "5"])
+    assert a("G7/Db")["notes"] == ["Db3", "G3", "B3", "F4"]
+    # B trades A's top two
+    b = voice_chords(["C/E"], "shell", top_notes="C")["voicings"][0]
+    assert (b["notes"], b["variant"]) == (["E3", "G3", "C4"], "B")
+    b = voice_chords(["Dm7/A"], "shell", top_notes="F")["voicings"][0]
+    assert (b["notes"], b["variant"]) == (["A3", "D4", "C5", "F5"], "B")
+    # plain chords are unchanged: the root is the bass
+    assert a("Cmaj7")["notes"] == ["C3", "E3", "B3"]
+    # the schemata's inversions survive shell voicing: the analyzer reads the same numerals back
+    from midi_composer_mcp.harmony import analyze_progression
+    from midi_composer_mcp.roman import progression_library
+    for name in ("romanesca", "prinner"):
+        syms = progression_library(name, root="C")["chords"]
+        voiced = voice_chords(syms, "shell")["chords"]
+        assert ([c["roman_figured"] for c in analyze_progression(voiced, "C")["chords"]]
+                == [c["roman_figured"] for c in analyze_progression(syms, "C")["chords"]]), name
 
 
 def test_top_note_with_octave():
@@ -258,22 +364,135 @@ def test_fixed_rootless_forms_keep_their_shape_in_every_key(tonic):
 
 @pytest.mark.parametrize("tonic", TONICS)
 def test_auto_rootless_picks_a_or_b_in_every_key(tonic):
-    """Levine's register floor makes the A/B choice key-dependent (in A the I chord takes form B),
-    but every voicing is exactly the chord's A or B form and the choice follows the cost rule."""
+    """Every voicing is exactly the chord's A or B form; the first is the form whose greedy chain
+    moves less in total (a tie keeps A), and each later one follows the cost rule."""
     syms = degrees_to_chords(tonic, "major", "ii V I", sevenths=True)["symbols"]
     r = voice_chords(syms, "rootless")
+    read = [_read(e, s) for e, s in zip(_parse_chord_list(syms), syms)]
+    from_a, from_b = (_greedy(read, "rootless", 4, True, None, first_style=f) for f in (None, "rootless_b"))
+    totals = [sum(_voicing_cost(x["midi"], y["midi"]) for x, y in zip(c, c[1:])) for c in (from_a, from_b)]
+    assert r["voicings"] == (from_b if totals[1] < totals[0] else from_a)
     prev = None
     for sym, v in zip(syms, r["voicings"]):
         a = voice_chords([sym], "rootless_a")["voicings"][0]["midi"]
         b = voice_chords([sym], "rootless_b")["voicings"][0]["midi"]
         assert v["midi"] == (a if v["variant"] == "A" else b)
         if prev is None:
-            assert v["variant"] == "A"
+            assert v["variant"] == ("B" if totals[1] < totals[0] else "A")
         else:
             ca, cb = _voicing_cost(prev, a), _voicing_cost(prev, b)
             assert v["variant"] == ("A" if (ca, -len(set(prev) & set(a))) <= (cb, -len(set(prev) & set(b)))
                                     else "B")
         prev = v["midi"]
+
+
+@pytest.mark.parametrize("scale, total", [("major", 6), ("harmonic minor", 10)])
+def test_auto_rootless_ii_v_i_alternates_forms_in_every_key(scale, total):
+    """Levine's ii-V-I alternates A-B-A or B-A-B in every key, each 7th falling a step to the next
+    chord's 3rd, with the same total movement in all keys."""
+    for tonic in TONICS:
+        syms = degrees_to_chords(tonic, scale, "ii V I", sevenths=True)["symbols"]
+        r = voice_chords(syms, "rootless")
+        variants = [v["variant"] for v in r["voicings"]]
+        assert variants in (["A", "B", "A"], ["B", "A", "B"]), (tonic, scale, variants)
+        assert r["total_movement"] == total, (tonic, scale)
+        for v, w in zip(r["voicings"], r["voicings"][1:]):
+            seventh = v["midi"][v["degrees"].index("b7")]
+            third = w["midi"][next(i for i, d in enumerate(w["degrees"]) if d in ("3", "b3"))]
+            assert seventh - third in (1, 2), (tonic, scale, v, w)
+
+
+@pytest.mark.parametrize("style", ["rootless_a", "rootless_b"])
+def test_rootless_forms_keep_every_named_tension_in_every_key(style):
+    """Every member a table chord names, other than its root and a perfect 5th, is in its rootless
+    voicing, labelled and spelled as the chord spells it; only triads, sus chords (a dominant 11th
+    among them) and dim7 are refused."""
+    refused = set()
+    for chord in CHORDS.values():
+        for tonic in TONICS:
+            symbol = f"{tonic}{chord.symbol}"
+            try:
+                v = voice_chords([symbol], style)["voicings"][0]
+            except ValueError:
+                refused.add(chord.name)
+                continue
+            root, ctype, _ = parse_chord_symbol(symbol)
+            wanted = {(label, n.name) for (label, _), n in zip(ctype.degrees, chord_notes(ctype, root))
+                      if label not in ("1", "5")}
+            got = set(zip(v["degrees"], (parse_note(n).pitch_class_name for n in v["notes"])))
+            assert wanted <= got, (style, symbol, v)
+    assert refused == {"major", "minor", "diminished", "augmented", "power chord", "suspended 2",
+                       "suspended 4", "dominant 7 sus 4", "dominant 7 sus 2", "diminished 7", "add 9",
+                       "minor add 9", "add 4", "dominant 11"}
+
+
+@pytest.mark.parametrize("tonic", TONICS)
+def test_shell_over_any_slash_bass_keeps_the_root_in_every_key(tonic):
+    """For every table chord over each of its own members (and a foreign bass), both shell forms
+    have the bass once at the bottom, always contain the root, repeat no pitch class, and add only
+    chord tones: 3 notes when the bass is itself a shell member, else the bass under all of R-3-7."""
+    for chord in CHORDS.values():
+        if chord.name == "power chord":      # no 3rd: no shell at all
+            continue
+        root = parse_note(tonic)
+        tones = chord_notes(chord, root)
+        foreign = [n for n in (transpose(root, 1, 1), transpose(root, 2, 1))
+                   if n.pitch_class not in {t.pitch_class for t in tones}][:1]
+        for bass in [t for t in tones if t.pitch_class != root.pitch_class] + foreign:
+            symbol = f"{tonic}{chord.symbol}/{bass.name}"
+            ch = _read(_parse_chord_list([symbol])[0], symbol)
+            third, seventh = _shell_members(ch)
+            shell_pcs = {root.pitch_class, third.note.pitch_class, seventh.note.pitch_class}
+            cands = _candidates(ch, "shell", 4, (0,))
+            assert [c["variant"] for c in cands] == ["A", "B"], symbol
+            for c in cands:
+                pcs = [n.pitch_class for n in c["notes"]]
+                assert pcs[0] == bass.pitch_class and len(set(pcs)) == len(pcs), (symbol, c)
+                assert root.pitch_class in pcs, (symbol, c)
+                assert {n.pitch_class_name for n in c["notes"][1:]} <= {t.name for t in tones}, (symbol, c)
+                assert len(pcs) == (3 if bass.pitch_class in shell_pcs else 4), (symbol, c)
+            assert cands[0]["notes"] != cands[1]["notes"], symbol
+            v = voice_chords([symbol], "shell")["voicings"][0]
+            assert v["notes"] in [[n.name for n in c["notes"]] for c in cands], symbol
+
+
+@pytest.mark.parametrize("octave", [0, 8, 9])
+def test_one_chord_voices_the_same_with_or_without_connect_in_every_key(octave):
+    """At the edges of MIDI 0-127 a single chord voices identically under both connect values, and
+    at octave 8 every rotating style still takes rotation 0 (an octave down where it must)."""
+    for tonic in TONICS:
+        for quality in ("maj7", "7", "m9", ""):
+            symbol = f"{tonic}{quality}"
+            for style in STYLES:
+                outs = []
+                for connect in (True, False):
+                    try:
+                        outs.append(voice_chords([symbol], style, octave=octave, connect=connect)["voicings"])
+                    except ValueError as e:
+                        outs.append(type(e))
+                assert outs[0] == outs[1], (symbol, style, octave, outs)
+                if octave == 8 and style in ("close", "drop2", "drop3", "drop24", "open"):
+                    assert outs[0][0]["variant"] == "rotation 0", (symbol, style)
+
+
+def test_close_variant_matches_the_replicated_search_in_every_key():
+    """Note arrays with a doubled root, through the delegated voice_leading path, are labelled with
+    the rotation the replicated search (which knows the rotation it stacked) reports."""
+    seen = set()
+    for tonic in TONICS:
+        root = parse_note(tonic)
+        chords = []
+        for semis, steps in ((0, 0), (5, 3), (7, 4), (0, 0)):
+            names = [n.name for n in chord_notes(CHORDS["major"], transpose(root, semis, steps))]
+            chords.append(names + names[:1])
+        for octave in (3, 4, 5):
+            ours = voice_chords(chords, "close", octave=octave)["voicings"]
+            read = [_read(e, c) for e, c in zip(_parse_chord_list(chords), chords)]
+            replicated = _greedy(read, "close", octave, True, None)
+            assert [v["notes"] for v in ours] == [v["notes"] for v in replicated], (tonic, octave)
+            assert [v["variant"] for v in ours] == [v["variant"] for v in replicated], (tonic, octave)
+            seen |= {v["variant"] for v in ours}
+    assert "rotation 3" in seen      # the doubled root on the bottom (F-F-A-C) does occur
 
 
 @pytest.mark.parametrize("scale", ["major", "harmonic minor", "melodic minor"])

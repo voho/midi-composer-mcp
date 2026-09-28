@@ -8,7 +8,9 @@ left-hand voicings are Levine's ("Left-hand voicings"). The menu of styles
 follows the voice-grouping profiles of chord tools such as Scaler. Everything
 here is deterministic: the connection is greedy (each chord takes the locally
 best voicing), exactly like harmony.voice_leading, and style 'close' without
-top_notes IS voice_leading, so the two can never disagree.
+top_notes IS voice_leading, so the two can never disagree (only where
+voice_leading raises because its unshifted first chord leaves MIDI 0-127 does
+the same search start from an in-range octave).
 """
 
 from __future__ import annotations
@@ -156,7 +158,12 @@ def _shell_members(ch: _Chord) -> tuple[_Tone, _Tone]:
 
 
 def _rootless_forms(ch: _Chord) -> tuple[list[_Tone], list[_Tone]]:
-    """Levine's rootless left-hand voicings (A form, B form) for one chord."""
+    """Levine's rootless left-hand voicings (A form, B form) for one chord.
+
+    Every tension the chord names is kept: the chord's own b9/#9 takes the 9's
+    slot, and its altered 5th, #11 (= b5) or b13 (= #5) takes the dominant's 13
+    slot; on a major or minor chord a named #11, 11 or 13 takes the 5th's slot.
+    """
     name = _name(ch)
     by_label = {t.label: t for t in ch.tones}
     third = by_label.get("3") or by_label.get("b3")
@@ -169,13 +176,19 @@ def _rootless_forms(ch: _Chord) -> tuple[list[_Tone], list[_Tone]]:
     seventh = by_label.get("7") or by_label.get("b7")
     sixth = by_label.get("6")
     fifth = next((by_label[f] for f in _FIFTHS if f in by_label), None)
+    altered = fifth if fifth is not None and fifth.label != "5" else None
     if seventh is None and sixth is None:
         raise ValueError(f"{name} has no 7th or 6th: rootless (Levine A/B) voicings need one")
     root = ch.root
     ninth = by_label.get("9") or _Tone(transpose(root, 14, 8), "9")
     if third.label == "3" and seventh is not None and seventh.label == "b7":   # dominant
-        color = fifth if fifth is not None and fifth.label != "5" else (
-            by_label.get("13") or _Tone(transpose(root, 21, 12), "13"))
+        if "11" in by_label:
+            # Levine reads a dominant 11th as a sus chord (G11 = G7sus4): the natural 11 is the
+            # avoid note over the major 3rd, so there is no 3rd-based A/B form to keep it in
+            raise ValueError(f"{name}: a dominant 11th is a sus sound (the 11 clashes with the major 3rd),"
+                             f" so it has no Levine rootless A/B voicing (use 'shell', 'open' or a drop style)")
+        color = (altered or by_label.get("#11") or by_label.get("b13") or by_label.get("13")
+                 or _Tone(transpose(root, 21, 12), "13"))
         tension = by_label.get("b9") or by_label.get("#9") or ninth
         return [third, color, seventh, tension], [seventh, tension, third, color]
     if third.label == "b3" and fifth is not None and fifth.label == "b5":      # half-diminished
@@ -184,7 +197,8 @@ def _rootless_forms(ch: _Chord) -> tuple[list[_Tone], list[_Tone]]:
     if fifth is None:  # no table chord gets here
         raise ValueError(f"{name} has no 5th for a rootless (Levine A/B) voicing")
     top = seventh or sixth                                                     # major / minor
-    return [third, fifth, top, ninth], [top, ninth, third, fifth]
+    color = altered or by_label.get("#11") or by_label.get("11") or by_label.get("13") or fifth
+    return [third, color, top, ninth], [top, ninth, third, color]
 
 
 def _variants(ch: _Chord, style: str, octave: int, shift: int) -> list[tuple[str, list[_Tone]]]:
@@ -205,8 +219,13 @@ def _variants(ch: _Chord, style: str, octave: int, shift: int) -> list[tuple[str
         bass = ch.bass or ch.root
         low = _Tone(Note(bass.letter, bass.accidental, octave - 1 + shift), _label_of(ch, bass) or "bass")
         if style == "shell":
+            # the shell is R-3-7 over the bass; a member the bass already is is not placed twice, so
+            # without a slash the root is the bass (R + 3-7 / 7-3) and with one the root stays above
+            # it (C/E -> E + C G). B trades the top two of A.
             third, seventh = _shell_members(ch)
-            return [("A", [low, third, seventh]), ("B", [low, seventh, third])]
+            root = next(t for t in ch.tones if t.label == "1")
+            upper = [t for t in (root, third, seventh) if t.note.pitch_class != bass.pitch_class]
+            return [("A", [low, *upper]), ("B", [low, *upper[:-2], upper[-1], upper[-2]])]
         fifth = next((t for t in ch.tones if t.label in _FIFTHS and t.note.pitch_class != bass.pitch_class),
                      None)   # a 5th already in the bass ('C/G') is not placed twice
         upper = [t for t in ch.tones if t is not fifth and t.label not in _FIFTHS
@@ -298,18 +317,25 @@ def _choose(ch: _Chord, style: str, octave: int, prev: list[int] | None, connect
             # voice_leading's tie-breaks: more common tones held, no octave shift, lower rotation
             key = (_voicing_cost(prev, midis), -held, abs(c["shift"]), c["rot"], c["var"])
         else:
-            key = (abs(c["shift"]), c["rot"], c["var"])
+            # rotation 0 / variant A whenever some octave shift of it fits in MIDI 0-127
+            key = (c["rot"], c["var"], abs(c["shift"]))
         if best_key is None or key < best_key:
             best, best_key = c, key
     return best
 
 
-def _greedy(read: list[_Chord], style: str, octave: int, connect: bool, tops: list[Note] | None) -> list[dict]:
-    """voice_leading's greedy chain over any style's candidates (optionally filtered by top notes)."""
+def _greedy(read: list[_Chord], style: str, octave: int, connect: bool, tops: list[Note] | None,
+            first_style: str | None = None) -> list[dict]:
+    """voice_leading's greedy chain over any style's candidates (optionally filtered by top notes).
+
+    `first_style` voices the first chord in another style (the auto 'rootless' search starts
+    one chain from form B).
+    """
     voicings = []
     prev: list[int] | None = None
     for i, ch in enumerate(read):
-        best = _choose(ch, style, octave, prev, connect, tops[i] if tops else None)
+        best = _choose(ch, first_style if i == 0 and first_style else style, octave, prev, connect,
+                       tops[i] if tops else None)
         voiced = best["notes"]
         voicings.append({"symbol": _name(ch) if ch.ctype else " ".join(n.pitch_class_name for n in voiced),
                          "notes": [n.name for n in voiced], "midi": [n.midi for n in voiced],
@@ -319,9 +345,21 @@ def _greedy(read: list[_Chord], style: str, octave: int, connect: bool, tops: li
 
 
 def _rotation_of(ch: _Chord, voiced: list[Note]) -> int:
+    """The rotation of the written tones that voice_leading stacked.
+
+    The whole voiced sequence is matched (not just its lowest note), so a doubled
+    tone ('F A C F' voiced F3 F4 A4 C5 = rotation 3) is not read as its first
+    occurrence; a rotation that repeats an earlier one gets the lower index, as
+    voice_leading's tie-break does.
+    """
     upper = voiced[1:] if ch.bass is not None else voiced
-    first = upper[0].without_octave()
-    return next((i for i, t in enumerate(ch.written) if t.note == first), 0)
+    seq = [n.pitch_class for n in upper]
+    written = [t.note.pitch_class for t in ch.written]
+    return next((r for r in range(len(written)) if written[r:] + written[:r] == seq), 0)
+
+
+def _total(voicings: list[dict]) -> int:
+    return sum(_voicing_cost(a["midi"], b["midi"]) for a, b in zip(voicings, voicings[1:]))
 
 
 def voice_chords(chords, style: str = "drop2", octave: int = 4, top_notes=None, connect: bool = True) -> dict:
@@ -332,6 +370,8 @@ def voice_chords(chords, style: str = "drop2", octave: int = 4, top_notes=None, 
     Styles (octave = the register, 4 = around middle C):
     - 'close': exactly voice_leading(chords, octave) (all tones stacked in chord
       order, nearest inversion). The only style that voices unnamed clusters.
+      Where voice_leading's unshifted first chord would leave MIDI 0-127 (it
+      raises there), the same search starts from an in-range octave instead.
     - 'drop2', 'drop3', 'drop24': four voices in close position, then the 2nd,
       the 3rd, or the 2nd and 4th voice from the top dropped an octave. A
       triad doubles its bottom voice on top (R-3-5-R in root position); a
@@ -342,23 +382,34 @@ def voice_chords(chords, style: str = "drop2", octave: int = 4, top_notes=None, 
       extensions, in chord order) stacked upward: Cmaj7 -> C3 G3 E4 B4.
     - 'shell': the bass in octave-1 plus the 3rd and 7th (a 6-chord's 6th, a
       triad's 5th; a sus 2nd/4th stands in for the 3rd): variant A = R-3-7,
-      B = R-7-3: Cmaj7 -> C3 E3 B3 / C3 B3 E4.
+      B = R-7-3: Cmaj7 -> C3 E3 B3 / C3 B3 E4. A slash bass goes under the
+      whole R-3-7 shell minus the member it already is, so the root is always
+      there and the bass is never doubled; B trades A's top two: C/E -> E3 C4
+      G4 / E3 G3 C4, Dm7/C -> C3 D3 F3, F/G -> G3 F4 A4 C5.
     - 'rootless_a', 'rootless_b', 'rootless' (A or B, whichever connects
       better): Mark Levine's left-hand rootless voicings (The Jazz Piano Book).
       Major and minor: A = 3-5-7-9, B = 7-9-3-5 (a 6 replaces the 7 in
-      6-chords); dominant: A = 3-13-b7-9, B = b7-9-3-13 (the chord's own b9/#9
-      replaces the 9, an altered 5th replaces the 13); m7b5: A = b3-b5-b7-1,
-      B = b7-1-b3-b5 (the root stays: the natural 9 is outside Locrian). The
-      bottom note is the lowest of its pitch class at or above D(octave-1), so
-      Levine's register rule picks A or B by key. Triads, sus and dim7 chords
-      raise ValueError.
+      6-chords; a named #11, 11 or 13 replaces the 5th: Cmaj7#11 -> E F# B D,
+      Cm11 -> Eb F Bb D); dominant: A = 3-13-b7-9, B = b7-9-3-13 (the chord's
+      own b9/#9 replaces the 9; an altered 5th, #11 or b13 replaces the 13:
+      C7#11 -> E F# Bb D); m7b5: A = b3-b5-b7-1, B = b7-1-b3-b5 (the root
+      stays: the natural 9 is outside Locrian). No tension the chord names is
+      dropped. The bottom note is the lowest of its pitch class at or above
+      D(octave-1). 'rootless' (connected) runs the chain from each first form
+      and keeps the smaller total_movement (a tie keeps A), so Levine's
+      register decides between A-B-A and B-A-B: a ii-V-I alternates in every
+      key (Bm7 E7 Amaj7 -> B A B). Triads, sus chords (a dominant 11th is one:
+      Levine reads C11 as C7sus4) and dim7 chords raise ValueError.
     A slash bass ('G7/B') always sits strictly below the voicing.
     connect=True chains GREEDILY (each chord locally best, like voice_leading,
     with its cost and tie-breaks): each chord takes the voicing (rotation x
     octave shift -1/0/+1; shell/rootless: variant A/B in their fixed register)
     that moves least from the previous one, then keeps more common tones, then
     no shift, then the lower rotation/variant; the first chord takes rotation
-    0 / variant A. connect=False takes rotation 0 / variant A for every chord.
+    0 / variant A ('rootless': A or B as above). connect=False takes rotation
+    0 / variant A for every chord. At the edge of MIDI 0-127 such a chord in
+    a rotating style (close, drops, open) takes rotation 0 an octave down or
+    up if that fits, and only then another rotation.
     top_notes (one per chord, e.g. a melody)
     keeps only voicings whose highest note is that note: an exact pitch with an
     octave ('E5'; octave shifts then widen to -2..+2, shell/rootless try
@@ -384,10 +435,18 @@ def voice_chords(chords, style: str = "drop2", octave: int = 4, top_notes=None, 
     read = [_read(e, item) for e, item in zip(parsed, items)]
     tops = _parse_top_notes(top_notes, len(read))
 
-    voicings = []
+    led = None
     if canonical == "close" and tops is None and connect:
         # delegated: style 'close' can never disagree with voice_leading
-        for ch, v in zip(read, voice_leading(chords, octave=octave)["voicings"]):
+        try:
+            led = voice_leading(chords, octave=octave)["voicings"]
+        except ValueError:
+            # voice_leading never shifts its first chord: when that register falls outside
+            # MIDI 0-127 the replicated search below starts from an in-range octave instead
+            led = None
+    if led is not None:
+        voicings = []
+        for ch, v in zip(read, led):
             voiced = parse_notes(v["notes"])
             members = {t.note.pitch_class: t.label for t in ch.tones}
             voicings.append({"symbol": _name(ch) if ch.ctype else v["symbol"], "notes": v["notes"],
@@ -395,9 +454,19 @@ def voice_chords(chords, style: str = "drop2", octave: int = 4, top_notes=None, 
                              "degrees": [members.get(n.pitch_class, "bass") for n in voiced] if ch.ctype else None})
     else:
         voicings = _greedy(read, canonical, octave, connect, tops)
+        if canonical == "rootless" and connect:
+            # Levine alternates the forms (A-B-A or B-A-B) so each 7th falls a step to the next 3rd,
+            # choosing the alternation by register: run the chain from each first form and keep the
+            # smaller total movement (a tie keeps the A start)
+            try:
+                from_b = _greedy(read, canonical, octave, connect, tops, first_style="rootless_b")
+            except ValueError:   # e.g. the first top note is not a tone of the B form
+                from_b = None
+            if from_b is not None and _total(from_b) < _total(voicings):
+                voicings = from_b
 
     notes = [v["notes"] for v in voicings]
-    total = sum(_voicing_cost(a["midi"], b["midi"]) for a, b in zip(voicings, voicings[1:]))
+    total = _total(voicings)
     return {
         "style": canonical,
         "voicings": voicings,
