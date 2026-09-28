@@ -32,13 +32,15 @@ from .generate import RHYTHM_REST, parse_rhythm
 from .harmony import (
     _FIGURE_MARKS, _bass_degree, _chord_items, _root_and_quality, analyze_progression, interval_between,
 )
-from .masters import RANGES, _VOICES, _consecutive_perfect, _direct_perfect, _overlap, _roles
+from .masters import (
+    RANGES, _VOICES, _augmented_sixth, _consecutive_perfect, _melodic_augmented, _overlap, _roles, _similar_leap,
+)
 from .midi_io import TICKS_PER_BEAT, _check_range, _parse_chord_list, assign_octaves, build_track_events
 from .notes import (
     LETTER_PCS, LETTERS, Note, note_from_midi, parse_note, parse_notes, spelling_for_pcs, transpose,
 )
-from .roman import _is_above, read_chord
-from .scales import resolve_scale_type
+from .roman import _is_above, _steps, read_chord
+from .scales import resolve_scale_type, scale_notes
 
 # ================================================================ detect_key
 
@@ -435,11 +437,56 @@ def _slices_from_tracks(voices):
     return [t[0] for t in timed], [t[1] for t in timed], slices, attacks, beats
 
 
-def _slice_chord(notes: list[Note]):
+def _align_voicings(chords: list[list[Note]]) -> list[list[Note | None]]:
+    """Voiced chords (each highest note first) -> slices of one voice per slot.
+
+    The parts are as many as the largest chord has notes. A chord of that size fills them in
+    order (part k = its k-th highest note). A smaller chord (a triad among sevenths: I V7 I) keeps
+    its notes in order and takes the parts nearest to where each voice last sounded (the smallest
+    total distance, ties to the upper parts), leaving the others silent (None) — a voice that
+    drops out or enters, as a silent track voice does. Before any voice has sounded, the first
+    full-size chord is the reference. Deterministic.
+    """
+    n = max(len(c) for c in chords)
+    last = list(next(c for c in chords if len(c) == n))   # where each part last sounded
+    out = []
+    for chord in chords:
+        m = len(chord)
+        # best[i][j]: the least total distance placing notes i.. into parts j.., order kept
+        best = [[math.inf] * (n + 1) for _ in range(m)] + [[0] * (n + 1)]
+        for i in range(m - 1, -1, -1):
+            for j in range(n - 1, -1, -1):
+                best[i][j] = min(best[i][j + 1], abs(chord[i].midi - last[j].midi) + best[i + 1][j + 1])
+        slots, j = [], 0
+        for i in range(m):   # the upper-most parts among the optimal assignments
+            while abs(chord[i].midi - last[j].midi) + best[i + 1][j + 1] != best[i][j]:
+                j += 1
+            slots.append(j)
+            j += 1
+        row: list[Note | None] = [None] * n
+        for note, p in zip(chord, slots):
+            row[p] = note
+            last[p] = note
+        out.append(row)
+    return out
+
+
+def _tertian(ctype) -> bool:
+    """A triad or a seventh-family chord: it has a third (a power chord or a sus chord has none)."""
+    degrees = dict(ctype.degrees)
+    return "3" in degrees or "b3" in degrees
+
+
+def _slice_chord(notes: list[Note], key: dict[str, int] | None = None):
     """(root, ChordType) of a sonority read lowest note first, or None if it is no chord.
 
-    Read by harmony._root_and_quality; failing that, as a chord with its fifth omitted
-    (G B F = G7, C E = C), the omission four-part writing allows. None when neither reads.
+    Read by harmony._root_and_quality; failing that, as a triad or seventh chord with its fifth
+    omitted (G B F = G7, C E = C), the omission four-part writing allows (Aldwell & Schachter,
+    Kostka & Payne). Only a completion with a third counts: a bare unison or octave (B B), a
+    second (B A) or a seventh (G F) is no chord, not a power or sus chord. The omitted fifth is the
+    root's perfect fifth or, with `key` ({letter: pitch class} of a seven-note scale), the key's
+    note on the fifth letter when that is a perfect or diminished fifth (B D in C = B D F, vii°).
+    None when nothing reads.
     """
     if len(notes) < 2:
         return None
@@ -450,8 +497,11 @@ def _slice_chord(notes: list[Note]):
         return root.without_octave(), ctype
     for cand in dict.fromkeys(n.without_octave() for n in asc):
         fifth = transpose(cand, 7, 4)
+        key_fifth = key.get(LETTERS[(LETTERS.index(cand.letter) + 4) % 7]) if key is not None else None
+        if key_fifth is not None and (key_fifth - cand.pitch_class) % 12 == 6:
+            fifth = transpose(cand, 6, 4)
         root, ctype, _bass = _root_and_quality(names + [fifth.name])
-        if ctype is not None and root.pitch_class == cand.pitch_class:
+        if ctype is not None and root.pitch_class == cand.pitch_class and _tertian(ctype):
             return root.without_octave(), ctype
     return None
 
@@ -468,8 +518,12 @@ def check_voice_leading(voices=None, voicings=None, root: str | None = None, sca
       attack (as music21 does): each voice contributes the note sounding then,
       a held note is oblique motion, a silent voice drops out of that slice.
       Track voices are ordered by mean pitch, highest first (`voice_order`).
-    - `voicings`: voiced note arrays of equal size (voice_leading's or
-      voice_chords' `chords`); part k is each chord's k-th highest note.
+    - `voicings`: voiced note arrays (voice_leading's or voice_chords'
+      `chords`, bach_chorale_voicing's rows); sizes may differ (I V7 I). There
+      are as many parts as the largest chord has notes: part k is a full-size
+      chord's k-th highest note, and a smaller chord keeps its notes in order
+      on the parts nearest where each voice last sounded, the others silent
+      for that slice (a voice drops out or enters, as in a track).
 
     Motion per voice pair (music21 VoiceLeadingQuartet): static, oblique,
     parallel (same direction, same generic interval), similar, contrary.
@@ -478,18 +532,31 @@ def check_voice_leading(voices=None, voicings=None, root: str | None = None, sca
     slices, both voices moving the same way); contrary_fifths/_octaves (the
     same by contrary motion — the strict textbook rule bach_chorale_voicing
     enforces); direct_fifths/_octaves (outer voices only: similar motion into a
-    P5/P8 with the upper voice leaping more than 2 semitones — Aldwell &
-    Schachter allow it when the soprano steps); voice_crossing; voice_overlap
-    (adjacent voices, music21); melodic_augmented (A2, A4… — the chromatic
-    A1 is fine; Kostka & Payne); melodic_leap_beyond_octave. With `root` (a
-    seven-note key): leading_tone (in the highest or lowest voice the leading
-    tone — tonic minus a semitone, the raised 7th in minor — of a chord on ^5
-    or ^7 rises to the tonic when the next chord's root is ^1 or ^6; in an inner
-    voice a 'frustrated leading tone' is only a warning; bach_chorale_voicing's
-    own soprano rule is stricter), seventh_resolution (a chord seventh falls
-    1–2 semitones when the harmony changes; held is a warning; chords are read
-    by harmony._root_and_quality, or with an omitted fifth), doubled_leading_tone
-    (in a chord on ^5 or ^7). Warnings: unequal_fifths (d5 -> P5 in similar
+    spelled P5/P8 from a differently spelled interval — a d6 counts, as in
+    music21's hiddenFifth — with the upper voice leaping more than 2 semitones;
+    Aldwell & Schachter allow it when the soprano steps); voice_crossing;
+    voice_overlap (adjacent voices, music21); melodic_augmented (A2, A4… — the
+    chromatic A1 is fine; Kostka & Payne; bach_chorale_voicing's own test);
+    melodic_leap_beyond_octave. With `root` (a seven-note key), reading each
+    slice as a tertian chord (triad or seventh; a missing fifth is restored as
+    the key's fifth: B D in C = vii°; a power chord, sus chord, bare octave or
+    dyad second is no harmony for these rules, except that one on the tonic is
+    still an arrival on ^1, as at Fux's cadence): leading_tone (in the highest or
+    lowest voice the leading tone — tonic minus a semitone, the raised 7th in
+    minor — of a chord on ^5 or a diminished chord on ^7 rises to the tonic when
+    the next chord's root is ^1 or ^6 and that chord lacks ^7 (Imaj7 may keep
+    it); ^1-^7-^6 stepping down in the lowest voice is a passing ^7, not a
+    fault (the Romanesca's 1-7-6, Gjerdingen; I V6 vi); in an inner voice a
+    'frustrated leading tone' is only a warning; bach_chorale_voicing's own
+    soprano rule is stricter), seventh_resolution (a chord seventh — spelled as
+    a seventh above the root — falls 1–2 semitones when the harmony changes;
+    held is a warning), augmented_sixth (It6, Fr43, Ger65, Sw43 — b6 in the
+    lowest voice with the note an augmented sixth above it, Ab–F# in C, read
+    by spelling: #4 rises a semitone and b6 falls a semitone to ^5 when the
+    harmony changes, Kostka & Payne, Aldwell & Schachter; held is a warning;
+    its #4 is no chord seventh), doubled_leading_tone (in a chord on ^5 or a
+    diminished chord on ^7; the root of V/iii, B D# F# in C, may double).
+    Warnings: unequal_fifths (d5 -> P5 in similar
     motion with the lowest voice; P5 -> d5 is fine), spacing (adjacent upper
     voices > 12 semitones, the lowest pair > 19), range (four voices: SATB
     ranges), melodic_seventh, leap_not_recovered (a leap of 8+ semitones not
@@ -531,12 +598,11 @@ def check_voice_leading(voices=None, voicings=None, root: str | None = None, sca
                 if n.octave is None:
                     raise ValueError(f"voicing {k}: {n.name} has no octave — voicings are concrete pitches such as 'C4'")
             slices.append(sorted(notes, key=lambda n: -n.midi))
-        if len({len(s) for s in slices}) != 1:
-            raise ValueError(f"voicings must all have the same size; got {[len(s) for s in slices]}")
-        if len(slices[0]) < 2:
+        if min(len(s) for s in slices) < 2:
             raise ValueError("voicings need at least 2 notes each")
+        slices = _align_voicings(slices)
         names = [f"voice {k}" for k in range(len(slices[0]))]
-        attacks = [[True] * len(slices[0]) for _ in slices]
+        attacks = [[n is not None for n in row] for row in slices]
 
     tonic = None
     if root is not None:
@@ -627,11 +693,14 @@ def check_voice_leading(voices=None, voicings=None, root: str | None = None, sca
             hi, lo = both[0], both[-1]
             p_h, p_l, c_h, c_l = prev[hi], prev[lo], cur[hi], cur[lo]
             move = f"{p_h.name}/{p_l.name} -> {c_h.name}/{c_l.name}"
-            if _direct_perfect(p_h.midi, p_l.midi, c_h.midi, c_l.midi):
-                what = _perfect(_vertical(c_h, c_l))
-                if what is not None:
-                    add(violations, k, [hi, lo], f"direct_{what}s",
-                        f"{move}: direct (hidden) {what} in the outer voices, the upper voice leaping")
+            # into a spelled P5/P8 from a differently spelled interval (a d6 is not a P5: music21's
+            # hiddenFifth), in similar motion with the upper voice leaping; a spelled P5 -> P5 is
+            # the parallel rule's case
+            what = _perfect(_vertical(c_h, c_l))
+            if (what is not None and _perfect(_vertical(p_h, p_l)) != what
+                    and _similar_leap(p_h.midi, p_l.midi, c_h.midi, c_l.midi)):
+                add(violations, k, [hi, lo], f"direct_{what}s",
+                    f"{move}: direct (hidden) {what} in the outer voices, the upper voice leaping")
             for v in both[:-1]:   # unequal fifths against the lowest voice
                 p_iv, c_iv = _vertical(prev[v], p_l), _vertical(cur[v], c_l)
                 d_v, d_l = cur[v].midi - prev[v].midi, c_l.midi - p_l.midi
@@ -651,8 +720,9 @@ def check_voice_leading(voices=None, voicings=None, root: str | None = None, sca
             if not attacks[k][v] or a_n.midi == b_n.midi:
                 continue
             iv = interval_between(a_n.name, b_n.name)
-            if iv["quality"] in ("augmented", "doubly augmented") and iv["number"] != 1:
-                add(violations, k, [v], "melodic_augmented", f"{a_n.name} -> {b_n.name}: a melodic {iv['name']}")
+            augmented = _melodic_augmented(a_n.name, b_n.name)   # bach_chorale_voicing's own test
+            if augmented is not None:
+                add(violations, k, [v], "melodic_augmented", f"{a_n.name} -> {b_n.name}: a melodic {augmented}")
             if abs(b_n.midi - a_n.midi) > 12:
                 add(violations, k, [v], "melodic_leap_beyond_octave",
                     f"{a_n.name} -> {b_n.name}: a leap of {abs(b_n.midi - a_n.midi)} semitones, beyond an octave")
@@ -676,13 +746,48 @@ def check_voice_leading(voices=None, voicings=None, root: str | None = None, sca
         t_pc = tonic.pitch_class
         leading = (t_pc - 1) % 12
         deg5, deg6 = (t_pc + scale.intervals[4]) % 12, (t_pc + scale.intervals[5]) % 12
-        chords = [_slice_chord([n for n in row if n is not None]) for row in slices]
+        key = {n.letter: n.pitch_class for n in scale_notes(scale, tonic)[:-1]}
+        chords, arrivals = [], []
+        for row in slices:   # tertian harmonies only: a power or sus chord is no harmony here
+            notes = [n for n in row if n is not None]
+            ch = _slice_chord(notes, key)
+            chords.append(ch if ch is not None and _tertian(ch[1]) else None)
+            # ...but a bare unison/octave, open fifth or sus chord ON THE TONIC is still an arrival on
+            # ^1 for the leading tone (Fux's cadence ends ^7-^1 on the final's octave or unison)
+            if chords[-1] is not None:
+                arrivals.append(chords[-1])
+            elif ch is not None and ch[0].pitch_class == t_pc:
+                arrivals.append(ch)
+            elif notes and {n.pitch_class for n in notes} == {t_pc}:
+                arrivals.append((tonic, None))
+            else:
+                arrivals.append(None)
 
         def label(ch):
-            return f"{ch[0].name}{ch[1].symbol}"
+            return f"{ch[0].name}{ch[1].symbol}" if ch[1] is not None else f"{ch[0].name} (octave)"
+
+        def leading_tone_chord(ch):
+            """^7 is a leading tone in a chord on ^5 (its third) or a diminished chord on ^7 (vii°,
+            vii°7, viiø7) — not in a major or minor chord on ^7, whose root it is (V/iii = B D# F#
+            in C; Kostka & Payne, secondary functions)."""
+            return ch[0].pitch_class == deg5 or (ch[0].pitch_class == leading and ch[1].intervals[:3] == (0, 3, 6))
+
+        def passing_bass(k, v):
+            """^1-^7-^6 stepping down in the lowest voice (the Romanesca's 1-7-6, Gjerdingen; the
+            descending 5-6 sequence): ^7 passes, it is no leading tone (Aldwell & Schachter)."""
+            p, c = slices[k - 1][v], slices[k][v]
+            if c.pitch_class != deg6 or not 1 <= p.midi - c.midi <= 2:
+                return False
+            for j in range(k - 2, -1, -1):   # the voice's pitch before this ^7
+                e = slices[j][v]
+                if e is None:
+                    return False
+                if e.midi != p.midi:
+                    return e.pitch_class == t_pc and 1 <= e.midi - p.midi <= 2
+            return False
 
         for k, ch in enumerate(chords):
-            if ch is None or ch[0].pitch_class not in (deg5, leading):
+            if ch is None or not leading_tone_chord(ch):
                 continue
             holders = [v for v in sounding(k) if slices[k][v].pitch_class == leading]
             if len(holders) > 1:
@@ -690,12 +795,15 @@ def check_voice_leading(voices=None, voicings=None, root: str | None = None, sca
                     f"the leading tone {slices[k][holders[0]].without_octave().name} is doubled in {label(ch)}")
         for k in range(1, len(slices)):
             prev, cur = slices[k - 1], slices[k]
-            before, after = chords[k - 1], chords[k]
+            before, after = chords[k - 1], arrivals[k]
             live = sounding(k - 1)
-            if (before is not None and after is not None and before[0].pitch_class in (deg5, leading)
-                    and after[0].pitch_class in (t_pc, deg6)):
+            if (before is not None and after is not None and leading_tone_chord(before)
+                    and after[0].pitch_class in (t_pc, deg6)
+                    and (after[1] is None or leading not in {t.pitch_class for t in chord_notes(after[1], after[0])})):
                 for v in live:
                     if prev[v].pitch_class != leading or cur[v] is None or cur[v].midi - prev[v].midi == 1:
+                        continue
+                    if v == live[-1] and passing_bass(k, v):
                         continue
                     move = f"{prev[v].name} -> {cur[v].name}"
                     if v in (live[0], live[-1]):
@@ -704,16 +812,38 @@ def check_voice_leading(voices=None, voicings=None, root: str | None = None, sca
                     else:
                         add(warnings, k, [v], "leading_tone",
                             f"{move}: frustrated leading tone (an inner voice of {label(before)} -> {label(after)})")
+            if {n.pitch_class for n in prev if n is not None} == {n.pitch_class for n in cur if n is not None}:
+                continue   # the same harmony goes on: a seventh or augmented sixth may resolve later
+            sounding_prev = [n for n in prev if n is not None]
+            aug6 = _augmented_sixth(sounding_prev, min(sounding_prev, key=lambda n: n.midi)) if sounding_prev else None
+            if aug6 is not None:   # It6/Fr43/Ger65/Sw43: its #4 is no chord seventh
+                low, high = aug6
+                for v in live:
+                    if cur[v] is None or prev[v].without_octave() not in aug6:
+                        continue
+                    upper = prev[v].without_octave() == high
+                    step = cur[v].midi - prev[v].midi
+                    move = f"{prev[v].name} -> {cur[v].name}"
+                    what = (f"the augmented sixth's upper note ({high.name}, #4)" if upper
+                            else f"the augmented sixth's lower note ({low.name}, b6)")
+                    should = "rise a semitone" if upper else "fall a semitone"
+                    if step == 0:
+                        add(warnings, k, [v], "augmented_sixth",
+                            f"{move}: {what} is held into the next chord (it should {should})")
+                    elif step != (1 if upper else -1):
+                        add(violations, k, [v], "augmented_sixth", f"{move}: {what} does not {should}")
+                continue
             if before is None:
                 continue
             _fifth_pc, seventh_pc = _roles(chord_notes(before[1], before[0]))
             if seventh_pc is None:
                 continue
-            if {n.pitch_class for n in prev if n is not None} == {n.pitch_class for n in cur if n is not None}:
-                continue   # the same harmony goes on: the seventh may resolve later
+            dim7 = (seventh_pc - before[0].pitch_class) % 12 == 9   # a bb7 may be respelled (Cb dim7: Ab)
             for v in live:
                 if prev[v].pitch_class != seventh_pc or cur[v] is None:
                     continue
+                if not dim7 and _steps(prev[v], before[0]) != 6:
+                    continue   # the same pitch spelled as another interval is no seventh
                 fall = prev[v].midi - cur[v].midi
                 move = f"{prev[v].name} -> {cur[v].name}"
                 if fall == 0:

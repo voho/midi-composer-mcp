@@ -5,7 +5,10 @@ its JSON), over the README progressions and a wider corpus in every key, with
 and without a melody. It was generated on main *before* masters.py's parallel,
 direct-motion and overlap tests were refactored into shared MIDI-level
 predicates (so check_voice_leading and the chorale engine cannot disagree), and
-tests/test_analysis.py asserts that nothing changed.
+tests/test_analysis.py asserts that nothing changed. It was regenerated on
+purpose when the engine gained the melodic-augmented-interval rule (the b6->#7
+step of iv6-V and VI-V in minor): 239 of the 2319 cases changed, 140 now avoid
+the A2/A4 and 99 report it as a rule break where the chords force it.
 
 Only regenerate it when a change to the chorale rules is intended:
 
