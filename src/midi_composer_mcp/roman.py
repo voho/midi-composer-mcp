@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from .chords import CHORDS, ChordType, _lookup_suffix, chord_notes, match_chords, parse_chord_symbol
 from .diatonic import borrowed_sources, diatonic_chords, roman_suffix, split_tokens
 from .notes import LETTERS, Note, parse_note, parse_notes, transpose
-from .scales import MAJOR_DEGREES, ScaleType, resolve_scale_type
+from .scales import MAJOR_DEGREES, ScaleType, resolve_scale_type, scale_notes
 
 # ------------------------------------------------------------------ grammar
 
@@ -64,6 +64,9 @@ _QUALITY = re.compile(r"^(°|o|ø|h|\+)?(Δ|M|maj)?(|6|64|7|65|43|42|2)$")
 _SEVENTH_FIGURES = ("7", "65", "43", "42", "2")
 _FIGURE_INDEX = {"": 0, "7": 0, "6": 1, "65": 1, "64": 2, "43": 2, "42": 3}
 _INVERSION_FIGURES = ("64", "65", "43", "42", "6", "7", "2")
+# music21's full figured-bass forms and the shorthand this grammar writes for them.
+_FULL_FIGURES = {"53": "", "63": "6", "753": "7", "653": "65", "643": "43", "642": "42"}
+_FULL_FIGURE = re.compile(r"^(°|o|ø|h|\+)?(Δ|M|maj)?(53|63|753|653|643|642)$")
 
 # The chord types the figure grammar can write (and so the only ones with figures).
 _TRIAD_TYPES = ("major", "minor", "diminished", "augmented")
@@ -157,9 +160,20 @@ def _quality(rest: str, upper: bool, token: str) -> tuple[ChordType, str, str | 
         text = "6"
     found = _suffix(text, upper)
     if found is None:
+        full = _FULL_FIGURE.match(rest)
+        if full:  # the complete figured-bass form of a figure the grammar writes in shorthand
+            mark, delta, fig = full.groups()
+            short = f"{mark or ''}{delta or ''}{_FULL_FIGURES[fig]}"
+            written = token.strip().replace(rest, short, 1) if rest in token else short
+            raise ValueError(
+                f"{token!r}: {fig} is the complete figured-bass form; write the shorthand"
+                f" {written!r} (music21's table: 53 -> '', 63 -> 6, 753 -> 7, 653 -> 65,"
+                f" 643 -> 43, 642 -> 42)")
         for fig in _INVERSION_FIGURES:
             head = text[: -len(fig)]
-            if text.endswith(fig) and head and _suffix(head, upper) is not None:
+            # a head that is itself a figure (the '6' of '643') is no embellished chord
+            if (text.endswith(fig) and head and head not in _INVERSION_FIGURES
+                    and _suffix(head, upper) is not None):
                 raise ValueError(
                     f"{token!r}: an embellished chord ({head}) takes no inversion figure ('{fig}')"
                     f" — Hookpad's rule; write it in root position, or use a triad/seventh figure"
@@ -180,7 +194,13 @@ def _quality(rest: str, upper: bool, token: str) -> tuple[ChordType, str, str | 
 
 
 def _suffix(text: str, upper: bool) -> ChordType | None:
-    candidates = [text] if upper else ["m" + text, text]
+    """The chord type of a suffix after a numeral; a lowercase numeral supplies the minor 'm'.
+
+    A suffix that already starts with a minor 'm' gets no second one ('iim7' is
+    m7, the minor seventh — never 'mm7', which would fold onto minor-major).
+    """
+    minor_m = text.startswith("m") and not text.startswith(("maj", "ma7"))
+    candidates = [text] if upper or minor_m else ["m" + text, text]
     for cand in candidates:
         found = _lookup_suffix(cand)
         if found is not None:
@@ -346,11 +366,14 @@ def roman_to_chords(numerals, root: str, scale_type: str = "major") -> dict:
     Dialect: an accidental is measured from the PARALLEL MAJOR ('bVII' in A
     minor = G; music21 would say Gb). Uppercase+7 = dominant 7 ('IV7' in C =
     F7), Δ7 = major 7 ('IVΔ7' = Fmaj7), lowercase+7 = minor 7, ° dim (°7 dim7),
-    ø half-dim, + aug. Figures invert: 6/64 (triads), 7/65/43/42 (sevenths); a
-    bare ø or Δ means the seventh chord ('viiø' = viiø7 — music21 reads a bare
-    'viiø' as a triad). Anything else after the numeral is a chord-symbol
-    suffix in root position ('V9', 'Vsus4', 'I6/9', 'IΔ9' = Cmaj9, 'Iadd6' =
-    C6, 'ii9' = Dm9, 'iim6' = Dm6); an embellished chord takes no inversion
+    ø half-dim, + aug. Figures invert: 6/64 (triads), 7/65/43/42 (sevenths) —
+    the shorthand; a full figure ('V643') is refused with the shorthand to
+    write ('V43'); a bare ø or Δ means the seventh chord ('viiø' = viiø7 —
+    music21 reads a bare 'viiø' as a triad). Anything else after the numeral
+    is a chord-symbol suffix in root position ('V9', 'Vsus4', 'I6/9', 'IΔ9' =
+    Cmaj9, 'Iadd6' = C6, 'ii9' = Dm9, 'iim6' = Dm6, 'iim7' = Dm7 — the 'm'
+    after a lowercase numeral is redundant, minor-major is 'iiΔ7'); an
+    embellished chord takes no inversion
     figure ('V96' is an error). X/Y is X in the key of Y (major, or natural
     minor for a minor Y), right-associative: 'V7/V' = D7, 'vii°7/V' = F#dim7,
     'V65/vi' = E7/G#, 'V/V/V' = A. Specials: 'N'/'N6' = Db/F, 'It6' = Ab C F#,
@@ -428,6 +451,34 @@ def roman_to_chords(numerals, root: str, scale_type: str = "major") -> dict:
 
 # ------------------------------------------------- shared recognition rules
 
+def _omitted_fifth(written: list[Note], bass: Note) -> tuple[Note, ChordType, Note] | None:
+    """(root, chord type, restored fifth) of a written set that no table chord matches, or None.
+
+    The omission four-part writing allows (Aldwell & Schachter; Kostka & Payne:
+    a seventh chord, or a doubled-root triad, may leave out its fifth — never
+    its third), read by letters + semitones: a candidate root (the bass first,
+    then the written order) with no note on its fifth's letter gets its perfect
+    fifth back, and the set must then SPELL a triad or seventh chord (the types
+    the figure grammar writes) on that root exactly — G B F = G7, D F C = Dm7,
+    C B E = Cmaj7, C E = C. Ab C F# stays unread (its F# is no seventh of Ab:
+    an It6), and so does a rootless jazz voicing such as F A B E (no four-part
+    chord). The rule check_voice_leading and find_cadences use, made
+    spelling-aware.
+    """
+    if not 2 <= len(written) <= 3:  # a triad or seventh chord less its fifth
+        return None
+    for cand in [bass] + [n for n in written if n != bass]:
+        fifth_letter = LETTERS[(LETTERS.index(cand.letter) + 4) % 7]
+        if any(n.letter == fifth_letter for n in written):
+            continue  # a note stands on the fifth's letter already: nothing is omitted
+        fifth = transpose(cand, 7, 4)
+        names = {n.name for n in written} | {fifth.name}
+        for name in _TRIAD_TYPES + _SEVENTH_TYPES:
+            if {t.name for t in chord_notes(CHORDS[name], cand)} == names:
+                return cand, CHORDS[name], fifth
+    return None
+
+
 def read_chord(item) -> dict:
     """Read a chord symbol or note array into {root, chord_type, bass, notes, written}.
 
@@ -437,10 +488,15 @@ def read_chord(item) -> dict:
     when every note carries an octave, otherwise the first note (the
     bach_chorale_voicing convention). Its root and type are the exact
     match_chords reading taken over that bass (root position first) whose
-    spelling is the written one — or the first exact reading; root and
-    chord_type are None for a set that is no table chord (e.g. It6). A dict
-    that is already a reading is returned as is. Values are Note / ChordType
-    objects (internal helper for the analysis tools).
+    spelling is the written one — or the first exact reading. A set that no
+    table chord matches is read with its omitted fifth restored when that
+    spells a triad or seventh chord exactly (G2 B3 F3 G4 = G7, D F C = Dm7,
+    C E = C — the omission four-part writing allows; the reading then adds
+    omitted_fifth, the restored Note, while `notes` stay as written);
+    otherwise root and chord_type are None (It6 Ab C F#, a cluster, a
+    rootless F A B E). A dict that is already a reading is returned as is.
+    Values are Note / ChordType objects (internal helper for the analysis
+    tools).
     """
     if isinstance(item, dict) and {"root", "chord_type", "bass", "notes"} <= item.keys():
         return item
@@ -465,6 +521,12 @@ def read_chord(item) -> dict:
         matches = match_chords([n.name for n in ordered], include_partial=False, limit=50)["matches"]
         names = {n.name for n in written}
         best = next((m for m in matches if set(m["notes"]) == names), matches[0] if matches else None)
+        if best is None:
+            restored = _omitted_fifth(written, bass)
+            if restored is not None:
+                root, ctype, fifth = restored
+                return {"root": root, "chord_type": ctype, "notes": written, "bass": bass, "written": True,
+                        "omitted_fifth": fifth}
         root = parse_note(best["root"]) if best else None
         ctype = CHORDS[best["chord_type"]] if best else None
         return {"root": root, "chord_type": ctype, "notes": written, "bass": bass, "written": True}
@@ -509,6 +571,19 @@ def _key(root, scale_type) -> tuple[Note, ScaleType, set[int]]:
     return tonic, scale, {(tonic.pitch_class + i) % 12 for i in scale.intervals}
 
 
+def applied_target_row(x: dict) -> bool:
+    """True when a diatonic_chords row can be an applied chord's target x.
+
+    x must be a major or minor triad other than the tonic, stacked in thirds on
+    its own degree. A row whose stacked notes are no table chord ('?' in its
+    roman), which diatonic_chords can only rename as another root's inversion
+    (C enigmatic's degree 2 Db F# A# = 'F#/Db'), is skipped: its numeral
+    ('bII') names a different chord than the one heard (F#).
+    """
+    return (x["degree"] != 1 and x["chord_type"] in ("major", "minor")
+            and "?" not in x.get("roman", "") and "bass" not in x)
+
+
 def applied_reading(chord, root, scale_type: str = "major") -> dict | None:
     """Read an out-of-key chord as an applied (secondary) V or vii° chord, or return None.
 
@@ -520,8 +595,10 @@ def applied_reading(chord, root, scale_type: str = "major") -> dict | None:
       a diatonic major or minor triad x (x not the tonic) is 'V<suffix>/x';
     - a dim, dim7 or m7b5 chord whose root is a spelled m2 below such an x is
       'vii°/x', 'vii°7/x' or 'viiø7/x'.
-    The target is x's diatonic numeral without its suffix ('ii', 'V', 'bVII').
-    In natural, harmonic and melodic minor a major/dominant chord on ^5, or a
+    The target is x's diatonic numeral without its suffix ('ii', 'V', 'bVII');
+    x is a triad stacked on its own degree (applied_target_row), so a scale
+    row that only reads as another root's inversion is never a target. In
+    natural, harmonic and melodic minor a major/dominant chord on ^5, or a
     dim/dim7/m7b5 chord on the raised ^7, is the minor mode's own dominant:
     {'applied': None, 'function_note': 'harmonic-minor dominant'}.
 
@@ -547,7 +624,7 @@ def applied_reading(chord, root, scale_type: str = "major") -> dict | None:
     if scale.name in _MINOR_MODES and ((dominant and rel == 7) or (leading and rel == 11)):
         return {"applied": None, "function_note": "harmonic-minor dominant"}
     for x in diatonic_chords(tonic.name, scale.name)["chords"]:
-        if x["degree"] == 1 or x["chord_type"] not in ("major", "minor"):
+        if not applied_target_row(x):
             continue
         xroot = parse_note(x["root"])
         if (dominant and _is_above(croot, xroot, 7, 4)) or (leading and _is_above(croot, xroot, 11, 6)):
@@ -700,12 +777,16 @@ PROGRESSIONS: dict[str, tuple] = {
                   _GALANT, (1, 7, 6, 3), (1, 5, 1, 1)),
     "do_re_mi": (("do-re-mi",), "major", "schema", "I V6 I",
                  "The Do-Re-Mi: melody 1-2-3 over bass 1-7-1.", _GALANT, (1, 7, 1), (1, 2, 3)),
-    "fenaroli": ((), "major", "schema", "V42 I6 V65 I",
-                 "The Fenaroli: melody 7-1-2-3 against bass 4-3-7-1.",
-                 _GALANT, (4, 3, 7, 1), (7, 1, 2, 3)),
+    # Gjerdingen, App. A: bass 7-1-2-3 against melody 4-3-7-1, sonorities 6/5/3, 5/3, 6/3, 6/3.
+    "fenaroli": ((), "major", "schema", "V65 I vii°6 I6",
+                 "The Fenaroli: melody 4-3-7-1 against bass 7-1-2-3, ending on a 6/3 (Gjerdingen: the"
+                 " 6/3 ending gives it its lack of finality).",
+                 _GALANT, (7, 1, 2, 3), (4, 3, 7, 1)),
+    # Gjerdingen, App. A: a local 4-3 in ii, then in I (5-4 | 4-3 in the home key) over #1-2 | 7-1.
     "fonte": ((), "major", "schema", "V65/ii ii V65 I",
-              "The Fonte: a sequence down a step, first to ii (minor), then to I (major).",
-              _GALANT, ("#1", 2, 7, 1), None),
+              "The Fonte: a sequence down a step, first to ii (minor), then to I (major); melody"
+              " 5-4-4-3 over bass #1-2-7-1.",
+              _GALANT, ("#1", 2, 7, 1), (5, 4, 4, 3)),
     "monte": ((), "major", "schema", "V65/IV IV V65/V V",
               "The Monte: a sequence up a step, first to IV, then to V.", _GALANT, (3, 4, "#4", 5), None),
 }
@@ -736,22 +817,60 @@ def _entry(name: str) -> dict:
     return entry
 
 
+def _degree_note(degree, tonic: Note, scale: ScaleType) -> Note:
+    """A table degree (4, or '#1' with its accidental) read in a key, spelled on its letter."""
+    notes = scale_notes(scale, tonic)
+    if isinstance(degree, str):
+        shift = degree.count("#") - degree.count("b")
+        return transpose(notes[int(degree.lstrip("#b")) - 1], shift, 0)
+    return notes[degree - 1]
+
+
+def _label(symbol) -> str:
+    return symbol if isinstance(symbol, str) else " ".join(symbol)
+
+
 def _resolve_entry(entry: dict, root: str, scale_type: str | None) -> dict:
-    scale_name = scale_type if scale_type is not None else (
-        "major" if entry["mode"] == "major" else "natural minor")
+    home = "major" if entry["mode"] == "major" else "natural minor"
+    scale_name = scale_type if scale_type is not None else home
     realized = roman_to_chords(entry["numerals"], root, scale_name)
-    entry["key"] = realized["key"]
+    key = realized["key"]
+    entry["key"] = key
     entry["chords"] = realized["symbols"]
     entry["bass"] = realized["bass"]
-    if "melody_degrees" in entry:
-        from .melody import notes_from_degrees  # melody imports midi_io; keep it lazy
-        tonic = parse_notes(root)[0].without_octave().name
-        entry["melody"] = notes_from_degrees(tonic, scale_name, entry["melody_degrees"])["notes"]
+    tonic = parse_notes(root)[0].without_octave()
     scale = resolve_scale_type(scale_name)
+    warnings: list[str] = []
     scale_mode = "major" if scale.intervals[2] == 4 else "minor"
     if scale_mode != entry["mode"]:
-        entry["warning"] = (f"{entry['name']} is a {entry['mode']}-mode progression resolved in"
-                            f" {realized['key']} (a {scale_mode} scale)")
+        warnings.append(f"{entry['name']} is a {entry['mode']}-mode progression resolved in {key}"
+                        f" (a {scale_mode} scale)")
+    if scale.name != home:
+        # the numerals follow the requested scale's own degrees: name every chord that leaves it
+        # although the entry's home mode holds it (the table's own chromatic chords stay silent)
+        at_home = roman_to_chords(entry["numerals"], tonic.name, home)["chords"]
+        moved = [f"{c['token']} = {_label(c['symbol'])} ({', '.join(c['non_scale_notes'])})"
+                 for c, h in zip(realized["chords"], at_home) if h["in_key"] and not c["in_key"]]
+        if moved:
+            warnings.append(f"these chords leave {key} although {tonic.pitch_class_name} {home} holds them"
+                            f" (the numerals follow the scale's own degrees): {'; '.join(moved)}")
+    if "bass_degrees" in entry:  # the chords' bass must be the table's bass line read in this key
+        want = [_degree_note(d, tonic, scale).pitch_class_name for d in entry["bass_degrees"]]
+        if want != realized["bass"]:
+            warnings.append(f"the chords' bass {' '.join(realized['bass'])} is not bass_degrees read in"
+                            f" {key} ({' '.join(want)})")
+    if "melody_degrees" in entry:
+        from .melody import notes_from_degrees  # melody imports midi_io; keep it lazy
+        melody = notes_from_degrees(tonic.name, scale_name, entry["melody_degrees"])["notes"]
+        clashes = [f"{note} against {_label(c['symbol'])}" for note, c in zip(melody, realized["chords"])
+                   if parse_note(note).pitch_class not in {parse_note(n).pitch_class for n in c["notes"]}]
+        if clashes:  # one texture or none: a melody that contradicts its chords is not handed on
+            warnings.append(f"melody withheld: melody_degrees read in {key} give {' '.join(melody)},"
+                            f" which clashes with the chords ({'; '.join(clashes)})")
+        else:
+            entry["melody"] = melody
+    if warnings:
+        entry["warning"] = "; ".join(warnings)
     return entry
 
 
@@ -769,8 +888,13 @@ def progression_library(name: str | None = None, root: str | None = None,
     `scale_type`, by default major for major entries and natural minor for
     minor ones — adding key, chords (symbols), bass (pitch classes, exact
     even for the chromatic Fonte and Monte basses) and, for schemata with
-    melody_degrees, melody. A minor entry resolved in a major scale (or the
-    reverse) is allowed and carries a warning. No popularity data is stored.
+    melody_degrees, melody. Any scale is allowed, and `warning` says what
+    changed: a minor entry in a major scale (or the reverse); chords that
+    leave the requested scale although the entry's home mode holds them (IV
+    in lydian is F#: 'IV = F# (A#, C#)'); a chord bass that is no longer
+    bass_degrees read in that scale; and a melody that clashes with its
+    chords, which is then withheld (melody, bass and chords always describe
+    one texture). No popularity data is stored.
     e.g. progression_library('andalusian', root='E') -> chords Em D C B;
     progression_library('prinner', root='G') -> chords C G/B F#dim/A G, bass
     C B A G, melody E D C B. Deterministic.

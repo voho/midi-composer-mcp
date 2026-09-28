@@ -362,6 +362,13 @@ def _degree_warning(token, entry: dict, root: str, scale: ScaleType, sevenths: b
     label = _chord_label(entry)
     have = [parse_note(n) for n in entry["notes"]]
     have_bass = parse_note(entry["bass"]) if "bass" in entry else have[0]
+    # '?' is diatonic_chords' marker for an unnamed stacked chord: silent only on a degree whose
+    # own stacked chord is unnamed (renamed as an inversion, or left as a note array)
+    unnamed = "bass" in entry or not isinstance(entry["symbol"], str)
+    if "?" in suffix and not unnamed:
+        return (f"{text} resolved to {label} (the scale's own chord); its '{suffix}' was ignored ('?'"
+                f" marks an unnamed chord, but this degree's chord is {label}: pass the chord's notes,"
+                f" or use roman_to_chords for a named quality)")
     if len(scale.intervals) == 7:
         from .roman import roman_to_chords  # roman imports this module at load time
 
@@ -369,7 +376,7 @@ def _degree_warning(token, entry: dict, root: str, scale: ScaleType, sevenths: b
             reading = roman_to_chords([text], root, scale.name)["chords"][0]
         except ValueError as e:
             if "?" in suffix:
-                return None  # diatonic_chords' own marker for an unnamed stacked chord
+                return None  # the degree's own unnamed stacked chord
             return (f"{text} resolved to {label} (the scale's own chord); its '{suffix}' was ignored"
                     f" (roman_to_chords rejects this numeral: {e})")
         want = {parse_note(n).pitch_class for n in reading["notes"]}

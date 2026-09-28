@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from midi_composer_mcp import harmony
+from midi_composer_mcp.analysis import find_cadences
 from midi_composer_mcp.chords import CHORDS, chord_notes
 from midi_composer_mcp.diatonic import _HARMONIC_FUNCTIONS, _ROMAN_BASE, diatonic_chords, roman_suffix
 from midi_composer_mcp.diatonic import numeral_base as _numeral_base
@@ -25,9 +26,11 @@ from midi_composer_mcp.harmony import (
     piston_sentence,
     voice_leading,
 )
-from midi_composer_mcp.notes import LETTERS, parse_note, parse_notes
+from midi_composer_mcp.masters import bach_chorale_voicing
+from midi_composer_mcp.notes import LETTERS, parse_note, parse_notes, transpose
 from midi_composer_mcp.roman import read_chord, roman_to_chords
-from midi_composer_mcp.scales import MAJOR_DEGREES, resolve_scale_type
+from midi_composer_mcp.scales import MAJOR_DEGREES, SCALES, resolve_scale_type, scale_notes
+from midi_composer_mcp.voicing import voice_chords
 
 TONICS = ["C", "G", "D", "A", "E", "B", "F#", "C#", "F", "Bb", "Eb", "Ab", "Db", "Gb"]
 MINOR_TONICS = ["A", "E", "B", "F#", "C#", "G#", "D#", "D", "G", "C", "F", "Bb", "Eb", "Ab"]
@@ -191,6 +194,77 @@ def test_unwritable_roots_have_no_roman_figured():
     assert one("C#m", "A", "natural minor")["roman_figured"] is None
     assert one("Em", "C", "dorian")["roman_figured"] is None
     assert one("C#m", "A", "natural minor")["roman"] == "iii"    # the existing field is untouched
+
+
+def test_clusters_have_no_roman_figured():
+    # '?' is no numeral roman_to_chords reads: an unnamed cluster gets null (its roman keeps the marker)
+    for notes, roman in ((["C", "Db", "D"], "I?"), (["G", "B", "Db"], "V?")):
+        r = one(notes)
+        assert r["roman"] == roman and r["roman_figured"] is None and r["chord_type"] == "unknown", notes
+    it6 = one(["Ab", "C", "F#"])
+    assert it6["special"] == "It6" and it6["roman_figured"] == "It6"   # a special still names itself
+    ab7 = one(["Ab", "C", "Gb"])            # spelled as Ab7 less its fifth: a writable numeral, the It6 sound
+    assert (ab7["roman_figured"], ab7["enharmonic_to"], ab7["omitted_fifth"]) == ("bVI7", "It6", "Eb")
+
+
+def test_fifthless_four_part_chords_are_read():
+    # bach_chorale_voicing drops a V7's fifth; analyze_progression now reads it as find_cadences does
+    bach = bach_chorale_voicing("C F C/G G7 C", root="C")
+    rows = [[row[v] for v in ("soprano", "alto", "tenor", "bass")] for row in bach["chords"]]
+    res = chords_of(rows)
+    assert [c["roman_figured"] for c in res] == ["I", "IV", "Cad64", "V7", "I"]
+    assert res[2]["special"] == "Cad64" and res[3]["omitted_fifth"] == "D" and res[3]["in_key"] is True
+    assert find_cadences(rows, "C")["cadences"][0]["romans"] == ["Cad64", "V7", "I"]
+    shell = voice_chords(["Dm7", "G7", "Cmaj7"], "shell")["chords"]
+    assert [c["roman_figured"] for c in chords_of(shell)] == ["ii7", "V7", "IΔ7"]
+
+
+@pytest.mark.parametrize("tonic", TONICS)
+def test_voiced_drafts_round_trip_in_every_key(tonic):
+    """bach_chorale_voicing and shell voicings: no '?' numeral, and roman_figured reads the chords back."""
+    for line, scale in (("I IV Cad64 V7 I", "major"), ("I vi ii65 V7 I", "major"), ("i iv V7 i", "natural minor")):
+        bach = bach_chorale_voicing(roman_to_chords(line, tonic, scale)["symbols"], root=tonic, scale_type=scale)
+        rows = [[row[v] for v in ("soprano", "alto", "tenor", "bass")] for row in bach["chords"]]
+        figured = [c["roman_figured"] for c in chords_of(rows, tonic, scale)]
+        assert all(f is not None and "?" not in f for f in figured), (tonic, line, figured)
+        for row, back in zip(rows, roman_to_chords(figured, tonic, scale)["chords"]):
+            assert {pc(n) for n in row} <= {pc(n) for n in back["notes"]}, (tonic, line)
+            assert pc(back["bass"]) == pc(min(parse_notes(row), key=lambda n: n.midi)), (tonic, line)
+    shell = voice_chords(roman_to_chords("ii7 V7 IΔ7", tonic)["symbols"], "shell")["chords"]
+    assert [c["roman_figured"] for c in chords_of(shell, tonic)] == ["ii7", "V7", "IΔ7"]
+
+
+def test_unwritable_slash_bass_is_kept_in_bass_degree():
+    # roman_figured has no way to write a bass the figure grammar cannot (sus/add/9 inversions, pedals):
+    # it is the root-position numeral, and bass_degree carries the bass to re-add in the new key
+    draft = ["C", "Cadd9/E", "F", "Gsus4/C", "G9/B", "G/C", "Dm/G", "C"]
+    res = chords_of(draft)
+    assert [c["roman_figured"] for c in res] == ["I", "Iadd9", "IV", "Vsus4", "V9", "V", "ii", "I"]
+    assert [c.get("bass_degree") for c in res] == [None, 3, None, 1, 7, 1, 5, None]
+    for tonic in TONICS:                     # the documented chain: roman_figured + bass_degree in another key
+        notes = scale_notes(resolve_scale_type("major"), parse_note(tonic))
+        moved = roman_to_chords([c["roman_figured"] for c in res], tonic)["symbols"]
+        for c, symbol, original in zip(res, moved, draft):
+            if c["figure"] is None:
+                rebuilt = f"{symbol}/{notes[c['bass_degree'] - 1].pitch_class_name}"
+                ref = chords_of([rebuilt], tonic)[0]
+                assert ref["roman"] == one(original)["roman"] and ref.get("bass_degree") == c["bass_degree"]
+
+
+@pytest.mark.parametrize("scale", [s.name for s in SCALES.values() if len(s.intervals) == 7])
+def test_applied_roman_figured_round_trips_in_every_mode(scale):
+    """V- and vii°-family chords read as applied realize themselves again (enigmatic, hungarian major ...)."""
+    symbols = [f"{letter}{acc}{q}" for letter in "CDEFGAB" for acc in ("", "#", "b")
+               for q in ("", "7", "dim7", "m7b5")]
+    for tonic in TONICS:
+        for s, entry in zip(symbols, chords_of(symbols, tonic, scale)):
+            if not entry.get("applied") or entry["roman_figured"] is None:
+                continue
+            back = roman_to_chords([entry["roman_figured"]], tonic, scale)["chords"][0]
+            assert pc(back["root"]) == pc(entry["root"]), (scale, tonic, s, entry["roman_figured"])
+            assert sorted(map(pc, back["notes"])) == sorted(n.pitch_class for n in read_chord(s)["notes"])
+    assert "applied" not in one("C#", "C", "enigmatic")             # not 'V/bII' (V of Db is Ab)
+    assert "applied" not in one("A#", "C", "hungarian major")       # not 'V/v' (V of G minor is D)
 
 
 def test_non_heptatonic_keys_keep_figures_only():
@@ -412,6 +486,91 @@ def test_tier_zero_and_rows():
     assert next_chords(["F#dim7"], "C")["candidates"][0]["symbol"] == "G"
     assert next_chords(["Bb"], "C")["last"]["degree"] == 7                # bVII uses row VII
     assert next_chords(["C", "Bdim"], "C")["symbols"][:2] == ["Em", "C"]   # VII: III, sometimes I
+
+
+def _chord_key(symbol, tonic="C", scale="major"):
+    r = read_chord(symbol)
+    root = parse_note(one(symbol, tonic, scale)["root"])
+    pcs = {n.pitch_class for n in r["notes"]} | {r["bass"].pitch_class}
+    if "omitted_fifth" in r:
+        pcs.add(r["omitted_fifth"].pitch_class)
+    return root.pitch_class, frozenset(pcs)
+
+
+def test_last_chord_is_never_its_own_candidate():
+    # a repetition is no root progression: the applied and mixture tiers used to offer the last chord again
+    for last in ("A7", "D7", "E7", "B7", "C7", "Fm", "Ab", "Bb", "Eb", "Ddim", "A7/C#"):
+        r = next_chords(["C", last], "C", limit=64)
+        assert _chord_key(last) not in {_chord_key(s) for s in r["symbols"]}, last
+        assert next_chords(["C", last], "C", sort="movement")["candidates"][0]["movement"] > 0, last
+    sev = next_chords(["C", "Fm7"], "C", sevenths=True, sort="movement")
+    assert "Fm7" not in sev["symbols"] and sev["candidates"][0]["movement"] > 0
+    assert next_chords(["C", "D7"], "C", sort="movement", limit=3)["symbols"] == ["F", "C7", "E7"]
+    fifthless = next_chords(["C", ["D3", "F#3", "C4"]], "C", limit=64)
+    assert fifthless["last"]["roman"] == "II7" and "D7" not in fifthless["symbols"]   # its fifth restored
+
+
+@pytest.mark.parametrize("tonic", TONICS)
+def test_no_self_candidate_in_every_key(tonic):
+    lasts = roman_to_chords("V7/ii V7/V V7/vi V7/iii V7/IV iv bVI bVII bIII ii° vii°7/V", tonic)["symbols"]
+    for last in lasts:
+        for sevenths in (False, True):
+            r = next_chords([last], tonic, sevenths=sevenths, limit=64)
+            assert _chord_key(last, tonic) not in {_chord_key(s, tonic) for s in r["symbols"]}, (tonic, last)
+
+
+def test_augmented_sixths_resolve_to_v_in_tier_zero():
+    # tier 0 follows analyze_progression: Fr43 is a special, not an applied V7b5/V
+    fr = next_chords([["Ab", "C", "D", "F#"]], "C")
+    assert [(c["symbol"], c["tier"]) for c in fr["candidates"][:2]] == [("G", 0), ("C/G", 0)]
+    assert fr["candidates"][0]["rule"].startswith("augmented sixth resolves to V")
+    assert all(c["rule"] != "applied chord resolves to its target" for c in fr["candidates"])
+    minor = next_chords([["F", "A", "B", "D#"]], "A", "natural minor")   # the major V, not Em, comes first
+    assert minor["symbols"][:2] == ["E", "Am/E"] and minor["tokens"][:2] == ["V", "Cad64"]
+    # the German sixth usually goes through the cadential 6/4 (parallel fifths), and Sw43 is spelled for it
+    ger = next_chords(roman_to_chords("I IV Ger65", "C")["symbols"], "C")
+    assert ger["tokens"][:2] == ["Cad64", "V"] and ger["candidates"][0]["tier"] == 0
+    assert "I" not in ger["tokens"]                                  # Cad64 is the tonic triad's best entry
+    it6 = next_chords([["Ab", "C", "F#"]], "C", sevenths=True)
+    assert it6["symbols"][:2] == ["G7", "C/G"]
+    assert next_chords(["Db/F"], "C")["symbols"][0] == "G"            # N6: the II row already puts V first
+
+
+@pytest.mark.parametrize("tonic", TONICS)
+def test_augmented_sixths_in_every_key(tonic):
+    for scale, home in (("major", tonic), ("natural minor", tonic)):
+        for special, first in (("It6", "V"), ("Fr43", "V"), ("Ger65", "Cad64"), ("Sw43", "Cad64")):
+            notes = roman_to_chords([special], home, scale)["symbols"][0]
+            r = next_chords([notes], home, scale, limit=64)
+            tier0 = [c for c in r["candidates"] if c["tier"] == 0]
+            assert [c["token"] for c in tier0] == ([first, "Cad64"] if first == "V" else ["Cad64", "V"]), \
+                (tonic, scale, special)
+            v = next(c for c in tier0 if c["token"] == "V")
+            assert v["symbol"] == transpose(parse_note(home), 7, 4).name, (tonic, scale, special)
+            for c, back in zip(tier0, roman_to_chords([c["token"] for c in tier0], home, scale)["chords"]):
+                assert sorted(map(pc, back["notes"])) == sorted(map(pc, c["notes"])), (tonic, special)
+
+
+def test_unwritable_candidates_have_a_null_token():
+    r = next_chords(["C"], "C", "double harmonic")
+    by_token = {c["token"]: c for c in r["candidates"]}
+    assert by_token[None]["symbol"] == ["G", "B", "Db"] and "V?" not in r["tokens"]
+    assert len(r["tokens"]) == len(r["symbols"])                     # kept aligned with the symbols
+    assert next_chords(["C"], "C", "double harmonic", sort="movement")["candidates"]  # sorts without a token
+
+
+@pytest.mark.parametrize("scale", [s.name for s in SCALES.values() if len(s.intervals) == 7])
+def test_tokens_realize_their_candidates_in_every_mode(scale):
+    """Every non-null token round-trips through roman_to_chords; null only for a note-array candidate."""
+    for tonic in ("C", "F#", "Bb", "E"):
+        for sevenths in (False, True):
+            r = next_chords([tonic], tonic, scale, sevenths=sevenths, limit=64)
+            for c in r["candidates"]:
+                if c["token"] is None:
+                    assert not isinstance(c["symbol"], str), (scale, tonic, c["symbol"])
+                    continue
+                back = roman_to_chords([c["token"]], tonic, scale)["chords"][0]
+                assert sorted(map(pc, back["notes"])) == sorted(map(pc, c["notes"])), (scale, tonic, c["token"])
 
 
 def test_movement_sort():

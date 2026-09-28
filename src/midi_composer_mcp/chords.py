@@ -139,6 +139,9 @@ for _chord in CHORDS.values():
             _CHORD_FOLDED.setdefault(_folded, _chord)
 for _key in _folded_collisions:
     _CHORD_FOLDED.pop(_key, None)
+# 'mm7' is the classical minor-minor seventh (Kostka & Payne's quality shorthand: the minor
+# seventh), so it must not fold onto minor major 7's 'mM7' alias; unknown, it is rejected.
+_CHORD_FOLDED.pop("mm7", None)
 
 
 def _is_minor_type(chord: ChordType) -> bool:

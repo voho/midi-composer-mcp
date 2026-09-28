@@ -270,7 +270,8 @@ def test_four_part_chords_with_an_omitted_fifth_are_read():
     """G B F (V7 without its fifth) and C C E C (a tonic without its fifth), as four-part writing allows."""
     arrays = [["C3", "E3", "C4", "G4"], ["F2", "F3", "C4", "A4"], ["G2", "E3", "C4", "G4"],
               ["G2", "F3", "B3", "G4"], ["C3", "C4", "E4", "C5"]]
-    assert analyze_progression(arrays, "C")["chords"][3]["chord_type"] == "unknown"   # the table alone cannot
+    v7 = analyze_progression(arrays, "C")["chords"][3]      # analyze_progression reads it the same way
+    assert (v7["chord_type"], v7["roman_figured"], v7["omitted_fifth"]) == ("dominant 7", "V7", "D")
     c = _only(find_cadences(arrays, "C"))
     assert (c["type"], c["subtype"], c["romans"]) == ("authentic", "perfect", ["Cad64", "V7", "I"])
     assert c["cadential_64"] is True and c["chords"][1] == ["G2", "F3", "B3", "G4"]   # echoed as written
