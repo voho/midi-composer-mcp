@@ -877,6 +877,40 @@ def check_voice_leading(voices: list | None = None, voicings: list | None = None
     return _analysis.check_voice_leading(voices=voices, voicings=voicings, root=root, scale_type=scale_type)
 
 
+@mcp.tool()
+def find_cadences(chords: str | list, root: str, scale_type: str = "major", soprano: str | list | None = None,
+                  phrase_ends: list[int] | str | None = None, phrase_length: int = 0) -> dict:
+    """Label the cadence at each phrase end — authentic (perfect/imperfect), half, Phrygian, plagal, deceptive or none.
+
+    Textbook rules (Kostka, Payne & Almén, Tonal Harmony ch. 10; Caplin,
+    Classical Form; Aldwell & Schachter) — a codification, not music21, which
+    has no cadence classifier. Give `chords` (symbols or note arrays;
+    bach_chorale_voicing's SATB rows written as [s, a, t, b] arrays read
+    correctly, even a V7 without its fifth) and a seven-note key. `soprano`:
+    one note per chord (bach_chorale_voicing(...)['voices']['soprano'] or your
+    melody); note arrays with octaves give their top note. Phrase ends:
+    `phrase_ends` (0-based chord indices, e.g. the last chord of each
+    plan_sections section), 'all' (every authentic, plagal and deceptive
+    cadence; half cadences only at the end), or `phrase_length` (every L
+    chords); default the last chord. Rules: authentic = V/vii° -> I; 'perfect'
+    needs root-position V–I AND ^1 in the soprano, and is never claimed without
+    it (unknown soprano: subtype null, 'give the soprano to decide PAC vs IAC');
+    otherwise 'imperfect' with the reason ('inversion', 'soprano on ^3',
+    'leading-tone chord'). plagal = IV/iv -> root-position I. deceptive = V ->
+    vi (VI in minor), bVI or IV6. half = ends on V ('phrygian' for iv6 -> V in
+    minor; a V7 or inverted V gets Caplin's root-position-triad caveat). 'none'
+    says why ('ends on vi'); ask next_chords for a stronger close. Each cadence
+    also gives its span, romans (ready for roman_to_chords; a Picardy tonic is
+    'I'), soprano and bass degrees, cadential_64, picardy and caveats;
+    `summary` counts the types.
+    e.g. find_cadences('C F C/G G7 C', 'C', soprano='E5 F5 E5 D5 C5') ->
+    authentic perfect, romans Cad64 V7 I, cadential_64 true;
+    find_cadences(['Am','Dm/F','E'], 'A', 'natural minor') -> half, phrygian.
+    """
+    return _analysis.find_cadences(chords, root, scale_type=scale_type, soprano=soprano,
+                                   phrase_ends=phrase_ends, phrase_length=phrase_length)
+
+
 # ------------------------------------------------------------ accompaniment
 
 @mcp.tool()

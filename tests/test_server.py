@@ -11,7 +11,7 @@ EXPECTED_TOOLS = {
     "match_scales", "match_chords", "diatonic_chords", "degrees_to_chords",
     "roman_to_chords", "progression_library", "chord_palette", "next_chords", "voice_chords",
     # analysis
-    "detect_key", "check_voice_leading",
+    "detect_key", "check_voice_leading", "find_cadences",
     # accompaniment
     "chord_pattern", "bass_line",
     # harmony rules

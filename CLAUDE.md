@@ -36,9 +36,13 @@ decides *which* rules to invoke and *how* to combine them to serve the goal.
    - **rhythm** as patterns: `O` strong beat, `o` weak beat, `.` rest.
    - **tracks** and **sections** as plain objects for the renderers/assembler.
    Rule sets named after a composer or theorist (Rameau, Schoenberg, Bach, Guido,
-   Fux, Coltrane, Messiaen, Glass, Reich…) must be faithful to that source and
-   say so in the docstring; if a detail is a later pedagogical codification
-   (e.g. "Bach-chorale rules" as taught from his chorales), say that too.
+   Fux, Coltrane, Messiaen, Glass, Reich, Piston, Levine, Gjerdingen…) must be
+   faithful to that source and say so in the docstring; if a detail is a later
+   pedagogical codification (e.g. "Bach-chorale rules" as taught from his
+   chorales), say that too. Ideas ported from software (music21, Scaler,
+   Hookpad, Klimper) come in as published rules or tables — never proprietary
+   corpus statistics or AI — and Roman numerals everywhere use roman.py's one
+   dialect (accidentals from the parallel major, IV7 = F7, IVΔ7 = Fmaj7).
    So `get_scale` → `notes` feeds `match_chords`, `random_notes`,
    `notes_to_midi`; `degrees_to_chords` → `symbols` feeds `voice_leading`,
    `chords_to_midi`, a section; `tintinnabuli_voice` → two note lists feed two
@@ -58,7 +62,9 @@ decides *which* rules to invoke and *how* to combine them to serve the goal.
    `chords_to_midi`, `drums_to_midi`, `song_to_midi`, `arrange_to_midi`,
    `arrange_song`, and `midi_to_audio` (renders a `.mid` to a playable WAV with
    a built-in synth, no soundfont needed). They render exactly what they are
-   given.
+   given — including comping (`durations`, a strike `rhythm`, `strum`) and
+   `swing`, which are rendering instructions, not musical choices. With default
+   options they must write byte-identical files (`tests/golden/`).
 
 5. **Keep `README.md` up to date.** It must always describe **every** tool and
    carry **enough examples across the difficulty range** — from the simple
@@ -73,18 +79,23 @@ decides *which* rules to invoke and *how* to combine them to serve the goal.
 ```
 src/midi_composer_mcp/
   notes.py        # note parsing, spelling, octaves, MIDI numbers (the vocabulary)
-  scales.py       # scale database (40+), generation, matching
-  chords.py       # chord database (35+), symbols, generation, matching
-  diatonic.py     # chords per scale degree, degree-sequence resolution
+  scales.py       # scale database (50), generation, matching
+  chords.py       # chord database (37), symbols, generation, matching
+  diatonic.py     # chords per scale degree, degree sequences, borrowing sources, chord_palette
+  roman.py        # the Roman-numeral dialect: roman_to_chords, progression_library, read_chord /
+                  #   applied_reading / special_reading helpers (never imports harmony)
   circle.py       # circle of fifths: key signatures and related keys
   forms.py        # form strings ('AABA', 'intro verse chorus') -> ordered labels
-  harmony.py      # intervals, roman-numeral analysis, voice leading, reharmonization
+  harmony.py      # intervals, roman-numeral analysis, voice leading, next_chords (Piston), reharmonization
+  voicing.py      # voice_chords: drop-2/3/2&4, open, shell, Levine rootless (close = voice_leading)
   melody.py       # degrees, arpeggios, walks, motif grammar, sequence, snap, tintinnabuli
+  accompany.py    # chord_pattern (Alberti, runs, Scaler-style motions) and bass_line
   counterpoint.py # species counterpoint 1-5 (deterministic, rule-following)
   chant.py        # Gregorian modes, Guido solmization + vowel method, cantus-firmus rules/generator
   masters.py      # named rule sets: Rameau, Schoenberg, Bach chorale SATB, neo-Riemannian, Bartók, Coltrane
   modern.py       # twelve-tone matrix, pitch-class sets, Glass additive process, Reich phasing
   generate.py     # the contained randomness + euclidean rhythm + groove presets
+  analysis.py     # reading a draft back: detect_key, find_cadences, check_voice_leading
   structure.py    # song structure: plan sections, assemble a whole song
   midi_io.py      # technical: deterministic MIDI rendering (mido)
   audio.py        # technical: MIDI -> playable WAV, pure standard library
