@@ -33,7 +33,7 @@ Several tools port the best ideas of composition software as **cited rules** rat
 | `degrees_to_chords` | Resolve a chosen degree sequence (`[1,5,6,4]`, `"I V vi IV"`) into concrete chords. Numerals are *positions* (`iv` in C is still F); a `warnings` list says when a numeral's case, mark or figure was ignored — use `roman_to_chords` to read numerals literally. |
 | `roman_to_chords` | Roman numerals read **literally** (the inverse of `analyze_progression`; Hookpad-style entry): case is the third (`iv` in C = Fm), accidentals count from the parallel major (`bVII` = Bb; in A minor = G), figures invert (`V6` = G/B, `ii65` = Dm7/F), `IV7` = F7 but `IVΔ7` = Fmaj7, applied chords (`V7/V` = D7, `vii°7/V` = F#dim7, `V/V/V` = A), `N6`, `It6`/`Fr43`/`Ger65`/`Sw43`, `Cad64`. Each chord comes with its kind (diatonic/borrowed/applied/…), `borrowed_from` (the parallel modes whose own notes spell it, judged by letters — so `III7` = E7 in C, whose G# no parallel mode has, is `chromatic`), `non_scale_notes`, fit and bass. |
 | `progression_library` | 28 named, cited progressions in that dialect: pop (axis, doo-wop, royal road, Andalusian…), jazz (ii–V–I, backdoor, ragtime…), 12-bar blues, lament bass, La Folia, passamezzo, Laitz's sequences (descending fifths, Pachelbel, ascending 5-6) and Gjerdingen's galant schemata (Prinner, Meyer, Romanesca, Do-Re-Mi, Fenaroli, Fonte, Monte) with bass degrees and — all but the Monte — melody degrees. Resolve any of them in any key, or any scale: a `warning` then names chords that leave it (`andalusian` in D dorian: `VI = B (D#, F#)`), and a schema melody that would clash with its chords is withheld. |
-| `chord_palette` | Every chord that fits a key, simplest first (a Klimper-style palette), in any scale: the stacked triads/sevenths, or with `extended` every chord type (sus, 6, add9, 7sus4 … up to `max_notes`) whose notes all lie in the scale. `borrow` / `source_modes` / `fifths_steps` add modal-interchange and neighbour-key chords, each with its source, distance, roman numeral (`bVI`, `iv`, `#iv°`), the scales whose own notes spell it and `same_notes_as` (`C6` = the notes of `Am7`). Chords are judged by letters + semitones: C harmonic minor has `Ebaug` but no `Abm` (that would need Cb), and a neighbour key keeps the home's letters (from Cb major the key a fifth down gives `Gbm` = `v`, not F#m). |
+| `chord_palette` | Every chord that fits a key, simplest first (a Klimper-style palette), in any scale: the stacked triads/sevenths, or with `extended` every chord type (sus, 6, add9, 7sus4 … up to `max_notes`) whose notes all lie in the scale. `borrow` / `source_modes` / `fifths_steps` add modal-interchange and neighbour-key chords, each with its source, distance, roman numeral (`bVI`, `iv`, `#iv°`), the scales whose own notes spell it and `same_notes_as` (earlier entries with the same notes: `Am7` → `C6`). Chords are judged by letters + semitones: C harmonic minor has `Ebaug` but no `Abm` (that would need Cb), and a neighbour key keeps the home's letters (from Cb major the key a fifth down gives `Gbm` = `v`, not F#m). |
 
 ### Harmony rules
 
@@ -181,7 +181,7 @@ degrees_to_chords("C", "major", "IV iv I")     → F  F  C  + warning "iv resolv
 ```
 chord_palette("A", "natural minor", extended=True)
    → 42 chords, simplest first: Am Asus4 Asus2 Bdim C Csus4 Csus2 Dm … Gsus2, then Am7 Amadd9 A7sus4 … —
-     each with its roman, family (major / minor / other) and same_notes_as (C6 has the notes of Am7)
+     each with its roman, family (major / minor / other) and same_notes_as (C6 lists Am7, which has the same notes)
 next_chords(["C","Am"], "C")
    → usual: Dm (ii), G (V) · sometimes: F (IV), Em (iii) · less often: C (I) · applied: A7 D7 B7 C7
    → mixture: Ddim (ii°), Fm (iv), Eb (bIII) · unlisted: Ab (bVI), Bb (bVII) — each with its rule,
@@ -370,9 +370,11 @@ arrange_song({                                                        # sequence
 **"Set 'Ut queant laxis' as Guido would, harmonize the result in four parts like a Bach chorale, and check its root progressions against Rameau and Schoenberg."**
 ```
 guido_vowel_melody("Ut queant laxis resonare fibris", "Dorian")    → a D-Dorian chant closing on D
-harmonize_melody(<the notes>, root="D", scale_type="dorian", in_scale=True) → a chord under each note
+harmonize_melody(<the notes>, root="D", scale_type="dorian", in_scale=True, max_chord_notes=3)
+                                                                    → Dm Dm Dsus2 Dsus2 Gsus2 Dm Dm F Dm Gsus2 Gsus2 Dsus4
 bach_chorale_voicing(<the progression>, root="D", scale_type="dorian", melody=<the notes>)
-                                                                    → SATB with the chant in the soprano
+                                                                    → SATB with the chant in the soprano (rule_breaks lists
+                                                                      the few parallels the fixed tune forces)
 rameau_fundamental_bass(<progression>, "D", "dorian"); schoenberg_progressions(<progression>)
 arrange_to_midi(<bach_chorale_voicing render_hint tracks>)         → a four-part chorale .mid
 ```
@@ -427,7 +429,8 @@ roman_to_chords("I V vi iv bVI bVII I", "C")    → C G Am Fm Ab Bb C
 ```
 detect_key(chords="C Am F G C Am F G G Em C D G Em C D", window_beats=16, hop_beats=16)
    → regions: C major (beats 0–32), G major (32–64)
-detect_key(tracks=<any render_hint or arrange_song section tracks>, window_beats=16)   → the same on a whole arrangement
+detect_key(tracks=<any render_hint or arrange_song section tracks>, window_beats=16, hop_beats=16)
+   → the same reading on a whole arrangement (drums ignored)
 ```
 
 **"Autumn-Leaves-style changes: rootless voicings in the left hand, drop-2 block chords under my melody in the right."**
@@ -469,7 +472,7 @@ python examples/generate_examples.py            # writes .mid + .wav for each
 
 ### Demo gallery
 
-The [**`demos/`**](demos/) folder is a gallery of finished pieces, each paired with the plain-language **prompt** it answers — from a Pärt-style tintinnabuli study to a modulating pop anthem, a jazz reharmonization, all five counterpoint species, a flamenco piece in Phrygian dominant, and a negative-harmony before/after. The `.mid` files are committed (open them in a DAW); regenerate everything with:
+The [**`demos/`**](demos/) folder is a gallery of finished pieces, each paired with the plain-language **prompt** it answers — from a Pärt-style tintinnabuli study to a modulating pop anthem, a jazz reharmonization, all five counterpoint species, a flamenco piece in Phrygian dominant, a negative-harmony before/after, and a swung jazz combo built from the ported tools (rootless comping, walking bass, cadence check). The `.mid` files are committed (open them in a DAW); regenerate everything with:
 
 ```bash
 python demos/generate.py                        # rewrites demos/*.mid and *.wav

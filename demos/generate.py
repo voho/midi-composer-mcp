@@ -27,6 +27,10 @@ from midi_composer_mcp.melody import (
 from midi_composer_mcp.midi_io import render_arrangement
 from midi_composer_mcp.structure import render_song_structure
 from midi_composer_mcp.audio import render_midi_to_wav
+from midi_composer_mcp.accompany import bass_line, chord_pattern
+from midi_composer_mcp.analysis import detect_key, find_cadences
+from midi_composer_mcp.roman import progression_library, roman_to_chords
+from midi_composer_mcp.voicing import voice_chords
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -194,6 +198,39 @@ def negative_harmony_demo(out):
                                  output_dir=out, file_name="06_negative_harmony.mid")
 
 
+# ============================== 7. JAZZ COMBO (ideas ported from Scaler / Hookpad / music21)
+def jazz_combo(out):
+    """A swung AABA-ish combo tune in F: a named turnaround, a backdoor bridge written in
+    Roman numerals, Levine rootless piano comping, a vibes figure over the voicings, a walking
+    bass, and swing on the song's grid — then read back with detect_key and find_cadences."""
+    a = progression_library("jazz_turnaround", root="F")["chords"] * 2       # Fmaj7 Dm7 Gm7 C7 x2
+    b = roman_to_chords("iv7 bVII7 IΔ7 IΔ7 ii7 V7 IΔ7 IΔ7", "F")["symbols"]  # backdoor, then ii-V-I
+    coda = roman_to_chords("ii7 V7 IΔ7 IΔ7", "F")["symbols"]
+
+    def section(chords):
+        lh = voice_chords(chords, "rootless", octave=4)
+        vibes = chord_pattern(lh["chords"], "^4 . 3 2 . 1 3 .", beats_per_chord=4, step_beats=0.5, smooth=False)
+        bass = bass_line(chords, "walking")
+        return {"bars": len(chords), "tracks": [
+            {"type": "chords", "name": "piano", "chords": lh["chords"], "rhythm": "O..o....", "step_beats": 0.5,
+             "program": 0, "velocity": 64, "accent_velocity": 80},                # Charleston comping
+            {**vibes["track"], "name": "vibes", "program": 11, "velocity": 78},
+            {**bass["track"], "program": 32, "velocity": 96},
+            {"type": "drums", "name": "drums", "step_beats": 0.5,
+             "lanes": {"ride": "O.oOO.oO" * len(chords), "pedal_hat": "..o...o." * len(chords)}},
+        ]}
+
+    sections = {"A": section(a), "B": section(b), "coda": section(coda)}
+    result = render_song_structure(sections, form="A B A coda", tempo=132, swing=2 / 3,
+                                   output_dir=out, file_name="07_jazz_combo.mid")
+    tune = a + b + a + coda
+    key = detect_key(chords=tune)
+    cad = find_cadences(tune, key["root"], key["scale_type"], phrase_ends=[7, 14, 23, 26])  # where each phrase arrives
+    result["analysis"] = f"key {key['root']} {key['scale_type']}; cadences " + ", ".join(
+        f"{c['index']}:{c['type']}" for c in cad["cadences"])
+    return result
+
+
 DEMOS = [
     (tintinnabuli_cantus,
      "Write a slow, meditative Arvo Part-style tintinnabuli piece in A minor — a melody that "
@@ -214,6 +251,10 @@ DEMOS = [
     (negative_harmony_demo,
      "Play a I-vi-IV-V with a melody in C, then play its negative-harmony mirror so I can hear "
      "major flip to its minor shadow."),
+    (jazz_combo,
+     "Write a swung jazz combo tune in F — a turnaround, a backdoor bridge, Bill Evans-style "
+     "rootless piano comping, a vibes line, a walking bass and ride cymbal — and tell me its key "
+     "and cadences."),
 ]
 
 

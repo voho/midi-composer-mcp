@@ -391,7 +391,8 @@ def chord_palette(root: str, scale_type: str = "major", extended: bool = False, 
     harmonic major), or only from `source_modes`; fifths_steps=n (0-6) borrows
     from the same mode n keys round the circle, each neighbour key spelled on
     the home's letters so its tokens read alike in every key (from Cb major the
-    key a fifth down gives Gbm 'v', not F#m) and the tritone key listed once. A
+    key a fifth down gives Gbm 'v', not F#m; only its source label uses the
+    practical name, 'E major' for Fb major) and the tritone key listed once. A
     borrowed chord has a note outside the key: chord_palette('C', borrow=True)
     adds D F#dim Bm (lydian), Edim Gm Bb (mixolydian), Cm Ebaug Adim (melodic
     minor), Ddim Fm Abaug (harmonic major), Eb (dorian), Ab (harmonic minor),
@@ -400,8 +401,8 @@ def chord_palette(root: str, scale_type: str = "major", extended: bool = False, 
     chord_type, size, degree, family (major/minor/other), core (the stacked
     chord), roman against the home tonic (7-note keys: 'bVI', 'iv', '#iv°',
     'Isus4'), degree_function, in_key, source ('C dorian'), distance (the
-    source's notes outside the key), non_home_notes, same_notes_as (C6 ~ Am7)
-    and sources (every considered scale, the home included, whose own notes
+    source's notes outside the key), non_home_notes, same_notes_as (earlier
+    entries with the same notes: Am7 -> C6) and sources (every considered scale, the home included, whose own notes
     spell it, e.g. Fm: C harmonic major, harmonic minor, natural minor,
     phrygian, locrian). In-key chords come first by (size, degree), borrowed
     ones by distance. `symbols` feed voice_leading / chords_to_midi, `tokens`

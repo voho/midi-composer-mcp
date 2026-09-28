@@ -55,6 +55,13 @@ here to keep the repo light — run the generator to render their audio).
 **Showcases:** the `negative_harmony` transformation applied to chords, bass, and melody — the original section followed by its mirror, so the flip is audible.
 🎵 [06_negative_harmony.mid](06_negative_harmony.mid) · 🔊 [.wav](06_negative_harmony.wav)
 
+### 7. Jazz combo — ideas ported from Scaler, Hookpad and music21
+
+> *"Write a swung jazz combo tune in F — a turnaround, a backdoor bridge, Bill Evans-style rootless piano comping, a vibes line, a walking bass and ride cymbal — and tell me its key and cadences."*
+
+**Showcases:** `progression_library` (the jazz turnaround), `roman_to_chords` (a backdoor bridge written as `iv7 bVII7 IΔ7 …`), `voice_chords` with Levine's rootless voicings comped in a Charleston `rhythm`, a `chord_pattern` vibes figure over those voicings, a `bass_line` walking bass, `swing` on the song's grid in `arrange_song`, and the draft read back with `detect_key` (F major) and `find_cadences` (half cadences at the turnarounds, authentic at the bridge and the coda).
+🎵 [07_jazz_combo.mid](07_jazz_combo.mid) · 🔊 [.wav](07_jazz_combo.wav)
+
 ---
 
 For the source that builds these, see [`generate.py`](generate.py); for library-level
