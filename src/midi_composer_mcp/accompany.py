@@ -163,8 +163,10 @@ def chord_pattern(chords, pattern="alberti", beats_per_chord=4.0, step_beats: fl
                   sustain: bool = False) -> dict:
     """Perform a chord-relative figure over a whole progression -> one notes track.
 
-    PATTERN: a preset or space-separated steps. A step is '.' (rest; a hold when
-    `sustain`) or [^]INDEX['|,]*: INDEX is 1-based, '^' accents the step ('O' in
+    PATTERN: a preset or space-separated steps. A step is '.' (rest; with
+    `sustain` a hold of the previous note — only within its chord: a sustained
+    pattern that would hold a note over a rest opening the next chord is a
+    ValueError) or [^]INDEX['|,]*: INDEX is 1-based, '^' accents the step ('O' in
     the rhythm, else 'o'), each ' raises it an octave and each , lowers it one
     (ABC-notation marks). Presets: alberti '^1 3 2 3', up '^1 2 3 4', down
     '^4 3 2 1', updown '^1 2 3 4 3 2', murky "^1, 1" (broken octaves).
@@ -228,6 +230,7 @@ def chord_pattern(chords, pattern="alberti", beats_per_chord=4.0, step_beats: fl
     notes: list[Note] = []
     rhythm: list[str] = []
     per_chord: list[dict] = []
+    held_from: int | None = None  # the chord (0-based) whose note a '.' would currently hold
     g = 0  # global step index, for phase='continue'
     for i, (p, voiced, s) in enumerate(zip(parsed, voicings, per_chord_steps)):
         entry = {"symbol": _symbol(p, voiced), "voicing": [n.name for n in voiced], "notes": []}
@@ -241,6 +244,14 @@ def chord_pattern(chords, pattern="alberti", beats_per_chord=4.0, step_beats: fl
             spec = steps[(g if phase == "continue" else j) % len(steps)]
             g += 1
             if spec is None:
+                if sustain and held_from is not None and held_from != i:
+                    raise ValueError(
+                        f"sustain would hold the last note of chord {held_from + 1}"
+                        f" ({per_chord[held_from]['symbol']}) over the rest that opens chord {i + 1}"
+                        f" ({entry['symbol']}), so it would sound under the wrong chord; make every"
+                        f" chord open on an index step (start the pattern on one, or change its"
+                        f" length or the phase), or set sustain=false"
+                    )
                 rhythm.append(RHYTHM_REST)
                 continue
             index, accent, shift = spec
@@ -260,6 +271,7 @@ def chord_pattern(chords, pattern="alberti", beats_per_chord=4.0, step_beats: fl
                     f" outside the MIDI range 0-127; lower the octave or the index"
                 )
             notes.append(note)
+            held_from = i
             entry["notes"].append(note.name)
             rhythm.append(RHYTHM_STRONG if accent else RHYTHM_WEAK)
         per_chord.append(entry)
@@ -327,19 +339,55 @@ def _below(tone: Note, prev: Note) -> int:
     return prev.midi - ((prev.pitch_class - tone.pitch_class) % 12 or 12)
 
 
+def _approach_sides(target: Note, prev: Note) -> tuple[Note, Note]:
+    """(preferred, other) chromatic neighbours of `target`: from below (target-1 on
+    the letter below: G -> F#, C -> B, Eb -> D) when the target is above `prev`,
+    else from above (target+1 on the letter above: C -> Db)."""
+    low = transpose(target, -1, -1)
+    high = transpose(target, 1, 1)
+    return (low, high) if target.midi > prev.midi else (high, low)
+
+
 def _approach(target: Note, prev: Note) -> Note:
     """A chromatic approach into `target` (already placed nearest `prev` and folded).
 
-    From below (target-1 on the letter below: G -> F#, C -> B, Eb -> D) when the
-    target is above the previous note, else from above (target+1 on the letter
-    above: C -> Db). If that pitch repeats the previous note, the other side is
-    used. The result is folded into E1-G3; the next chord's bass is then placed
-    nearest this note, so the approach always resolves by a semitone.
+    The preferred side of _approach_sides; if that pitch repeats the previous
+    note, the other side is used. The result is folded into E1-G3; the next
+    chord's bass is then placed nearest this note, so the approach always
+    resolves by a semitone.
     """
-    low = transpose(target, -1, -1)
-    high = transpose(target, 1, 1)
-    first, second = (low, high) if target.midi > prev.midi else (high, low)
+    first, second = _approach_sides(target, prev)
     return _fold(second if first.midi == prev.midi else first)
+
+
+def _seam_approach(target: Note, prev: Note) -> Note:
+    """The loop's closing approach into `target`, the line's fixed first note.
+
+    Unlike _approach the target cannot be re-placed near the approach, so the
+    approach is never folded: the preferred side of _approach_sides, else the
+    other side when the preferred pitch repeats `prev` or leaves E1-G3. When
+    neither side is free (target E1 after F1, or G3 after F#3) the in-range
+    neighbour is kept even though it repeats `prev`: it still resolves into the
+    first note by a semitone.
+    """
+    first, second = _approach_sides(target, prev)
+
+    def free(n: Note) -> bool:
+        return BASS_LOW <= n.midi <= BASS_HIGH and n.midi != prev.midi
+
+    if free(first):
+        return first
+    if free(second):
+        return second
+    return first if BASS_LOW <= first.midi <= BASS_HIGH else second
+
+
+def _approach_to(prev: Note, nxt: Note | None, seam: Note | None) -> Note:
+    """The approach after `prev`: into the placed loop start `seam`, else into `nxt`
+    placed nearest `prev`."""
+    if seam is not None:
+        return _seam_approach(seam, prev)
+    return _approach(_nearest(nxt, prev.midi), prev)
 
 
 def _bass_reading(item, parsed: dict) -> dict:
@@ -410,7 +458,7 @@ class _MiddleTones:
 
 def bass_line(chords, style: str = "root", beats_per_chord=4.0, step_beats: float = 1.0,
               rhythm: str | None = None, octave: int = 2, pedal: str | None = None,
-              ending: str = "loop") -> dict:
+              ending: str = "loop", sustain: bool | None = None) -> dict:
     """Write a bass track from chords by fixed rules -> one notes track (GM finger bass).
 
     BASS NOTE: the slash bass, else the root; for a note array its lowest note
@@ -430,7 +478,12 @@ def bass_line(chords, style: str = "root", beats_per_chord=4.0, step_beats: floa
     - root: the bass on every onset; 'O' + '.'*(s-1), held.
     - root_fifth: bass, then the chord's own fifth (P5/b5/#5, else the root)
       nearest below it, alternating — the country/polka two-beat; 'O.o.' tiled.
+      Over a chord whose bass already is its fifth (a 6/4: C/G, G7/D) the
+      alternate is the root instead; an alternate that folds onto the bass's
+      own pitch is played an octave above it.
     - root_octave: bass and the same note an octave up, alternating; 'Oo' tiled.
+      A bass from Ab2 up (whose octave would pass G3) is played an octave lower,
+      so the octave always sounds.
     - approach: the bass, then on the last onset a chromatic approach into the
       next chord's bass — from below when it lies above (G -> F#, Eb -> D), else
       from above (C -> Db); if that pitch repeats the previous note, from the
@@ -442,15 +495,27 @@ def bass_line(chords, style: str = "root", beats_per_chord=4.0, step_beats: floa
       walking-bass pedagogy (Friedland, Building Walking Bass Lines, 1995).
     - pedal: every onset the `pedal` note (default the first bass), whatever the
       chord — a pedal point.
-    ENDING: 'loop' approaches the first chord from the last (a repeated section
-    connects); 'root' gives the last chord no approach (walking takes its next
-    middle tone, approach its bass).
+    ENDING: 'loop' approaches the first chord from the last, aiming at the line's
+    actual first note (so a repeated section connects by a semitone; that
+    approach is not folded, and takes the other side when its pitch would repeat
+    the previous note or leave E1-G3 — if neither side is free, as for E1 after
+    F1, the repeated neighbour is kept); 'root' gives the last chord no approach
+    (walking takes its next middle tone, approach its bass).
+
+    SUSTAIN: `sustain` None takes the style's default — root, approach and pedal
+    hold each note over the rests after it, the others play each note for one
+    step; True/False overrides it. A hold never crosses a chord change: as a
+    notes track holds a note over every following '.', a held style whose
+    `rhythm` opens with '.' is played detached (sustain false) over two or more
+    chords, and sustain=True with such a rhythm is a ValueError. Pedal is exempt:
+    its note is the same under every chord.
 
     Returns {style, ending, steps_per_chord, total_beats, track {type 'notes',
     name 'bass', notes with octaves, rhythm, step_beats, sustain, program 33},
     per_chord [{symbol, notes}], render_hint {tracks: [the bass track]}}.
     e.g. bass_line(['C','Am','F','G'], 'walking') -> C2 E2 G2 G#2 | A2 C3 E3 Gb3 |
-    F3 C3 A2 Ab2 | G2 B2 D3 Db3; bass_line(['C','G/B','Am','F']) -> C2 B1 A1 F1.
+    F3 C3 A2 Ab2 | G2 B2 D3 Db2 (Db2 leads back into the first C2);
+    bass_line(['C','G/B','Am','F']) -> C2 B1 A1 F1.
     """
     items = _chord_items(chords)
     parsed = _parse_chord_list(items)
@@ -460,6 +525,8 @@ def bass_line(chords, style: str = "root", beats_per_chord=4.0, step_beats: floa
     beats, _listed = _chord_beats(beats_per_chord, len(parsed))
     per_chord_steps = _chord_steps(beats, step)
     _check_range("octave", octave, 0, 4, integer=True)
+    if sustain is not None:
+        _check_bool(sustain, "sustain")
     if pedal is not None and style != "pedal":
         raise ValueError(f"pedal is only used with style='pedal' (style is {style!r})")
     if rhythm is not None:
@@ -476,6 +543,19 @@ def bass_line(chords, style: str = "root", beats_per_chord=4.0, step_beats: floa
         rhythms = [pattern] * len(parsed)
     else:
         rhythms = [_default_rhythm(style, s) for s in per_chord_steps]
+    # a hold would carry each chord's last note over the rest that opens the next chord
+    crosses = len(parsed) > 1 and style != "pedal" and rhythms[0][0] == RHYTHM_REST
+    if sustain is None:
+        held = _SUSTAINED[style] and not crosses
+    elif sustain and crosses:
+        raise ValueError(
+            f"sustain would hold each chord's last bass note over the rest that opens the next"
+            f" chord (rhythm {rhythms[0]!r} starts with '.'), so it would sound under the wrong"
+            f" chord; start the rhythm with an onset, or leave sustain unset (or false) to play"
+            f" the line detached"
+        )
+    else:
+        held = sustain
     readings = [_bass_reading(item, p) for item, p in zip(items, parsed)]
 
     if style == "pedal":
@@ -488,6 +568,7 @@ def bass_line(chords, style: str = "root", beats_per_chord=4.0, step_beats: floa
     per_chord: list[dict] = []
     prev: Note | None = None      # the previous sounding note
     anchor: Note | None = None    # where the next chord's bass is placed from
+    first: Note | None = None     # the first chord's placed bass: where a loop starts again
     for i, (reading, pat) in enumerate(zip(readings, rhythms)):
         m = sum(1 for c in pat if c != RHYTHM_REST)
         last = i == len(readings) - 1
@@ -496,27 +577,40 @@ def bass_line(chords, style: str = "root", beats_per_chord=4.0, step_beats: floa
         else:
             b = reading["bass"]
             bass = _fold(Note(b.letter, b.accidental, octave)) if anchor is None else _nearest(b, anchor.midi)
+            if style == "root_octave" and bass.midi + 12 > BASS_HIGH:
+                bass = _with_octave(bass, bass.midi - 12)   # its octave above would pass G3
+            if first is None:
+                first = bass
             seq = [bass]
-            nxt = None if last and ending == "root" else readings[0 if last else i + 1]["bass"]
+            # the last onset approaches the next chord's bass (placed nearest the note before
+            # it) or, closing a loop, the line's fixed first note; ending='root': nothing
+            nxt = None if last else readings[i + 1]["bass"]
+            seam = first if last and ending == "loop" else None
+            approaches = nxt is not None or seam is not None
             if style == "root":
                 seq *= m
             elif style == "root_fifth":
-                fifth = _fold(_with_octave(reading["fifth"], _below(reading["fifth"], bass)))
+                alt = reading["fifth"]
+                if alt.pitch_class == bass.pitch_class:   # a 6/4 chord: the bass is the fifth
+                    alt = reading["root"]
+                fifth = _fold(_with_octave(alt, _below(alt, bass)))
+                if fifth.midi == bass.midi:               # folded back onto the bass: an octave above
+                    fifth = _with_octave(alt, bass.midi + 12)
                 seq = [bass if k % 2 == 0 else fifth for k in range(m)]
             elif style == "root_octave":
-                high = _fold(_with_octave(bass, bass.midi + 12))
+                high = _with_octave(bass, bass.midi + 12)
                 seq = [bass if k % 2 == 0 else high for k in range(m)]
             elif style == "approach":
                 seq *= m
-                if m >= 2 and nxt is not None:
-                    seq[-1] = _approach(_nearest(nxt, bass.midi), bass)
+                if m >= 2 and approaches:
+                    seq[-1] = _approach_to(bass, nxt, seam)
             else:  # walking
                 middle = _MiddleTones(reading["ring"])
-                count = m - 1 if nxt is None else m - 2
+                count = m - 2 if approaches else m - 1
                 for _ in range(max(0, count)):
                     seq.append(middle.next(seq[-1]))
-                if m >= 2 and nxt is not None:
-                    seq.append(_approach(_nearest(nxt, seq[-1].midi), seq[-1]))
+                if m >= 2 and approaches:
+                    seq.append(_approach_to(seq[-1], nxt, seam))
             anchor = bass if style in ("root_fifth", "root_octave") else seq[-1]
         if seq:
             prev = seq[-1]
@@ -527,7 +621,7 @@ def bass_line(chords, style: str = "root", beats_per_chord=4.0, step_beats: floa
 
     track = {"type": "notes", "name": "bass", "notes": [n.name for n in out],
              "rhythm": parse_rhythm("".join(rhythms)), "step_beats": step,
-             "sustain": _SUSTAINED[style], "program": BASS_PROGRAM}
+             "sustain": held, "program": BASS_PROGRAM}
     return {
         "style": style,
         "ending": ending,

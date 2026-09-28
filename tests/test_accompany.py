@@ -228,8 +228,9 @@ def test_pattern_chains_from_roman_numerals_and_progressions(tmp_path):
 
 def test_walking_example_exactly():
     r = bass_line(["C", "Am", "F", "G"], "walking")
+    # the loop's closing approach aims at the line's real first note, C2 (not a C3 nearest D3)
     assert [e["notes"] for e in r["per_chord"]] == [
-        ["C2", "E2", "G2", "G#2"], ["A2", "C3", "E3", "Gb3"], ["F3", "C3", "A2", "Ab2"], ["G2", "B2", "D3", "Db3"]]
+        ["C2", "E2", "G2", "G#2"], ["A2", "C3", "E3", "Gb3"], ["F3", "C3", "A2", "Ab2"], ["G2", "B2", "D3", "Db2"]]
     assert r["track"]["rhythm"] == "Oooo" * 4
     assert r["track"]["sustain"] is False and r["track"]["program"] == 33
     assert r["track"]["name"] == "bass" and r["track"]["step_beats"] == 1.0
@@ -282,7 +283,8 @@ def test_approach_folded_at_the_top_of_the_register_still_resolves_by_a_semitone
 
 def test_every_style_stays_in_the_walking_register():
     assert bass_line(["E"], "root_fifth", octave=1)["track"]["notes"] == ["E1", "B1"]   # B0 folded up
-    assert bass_line(["G"], "root_octave", octave=3)["track"]["notes"] == ["G3", "G3"] * 2  # G4 folded down
+    # G4 would pass G3: the pair is played an octave lower instead of collapsing to G3 G3
+    assert bass_line(["G"], "root_octave", octave=3)["track"]["notes"] == ["G2", "G3"] * 2
     progressions = [["C", "Am", "F", "G"], ["E", "B7", "C#m7", "A"], ["G", "D/F#", "Em7", "Cmaj7", "Bb13"],
                     ["F#m7b5", "B7b9", "Em"], [["C", "Db", "D"], ["E3", "G3", "C4"]]]
     for chords in progressions:
@@ -305,6 +307,93 @@ def test_root_fifth_and_root_octave_patterns():
     # the chord's own fifth: b5 of a diminished chord, #5 of an augmented one
     assert bass_line(["Bdim"], "root_fifth", octave=2)["track"]["notes"] == ["B2", "F2"]
     assert bass_line(["Caug"], "root_fifth", octave=2)["track"]["notes"] == ["C2", "G#1"]
+
+
+def test_root_octave_never_collapses_into_unisons():
+    # a bass from Ab2 up would fold its octave back onto itself: the pair moves an octave down
+    r = bass_line(["A", "D", "E", "A"], "root_octave")
+    assert [e["notes"] for e in r["per_chord"]] == [["A1", "A2"] * 2, ["D2", "D3"] * 2, ["E2", "E3"] * 2,
+                                                    ["A1", "A2"] * 2]
+    assert [e["notes"] for e in bass_line(["G", "C"], "root_octave")["per_chord"]] == [
+        ["G2", "G3"] * 2, ["C2", "C3"] * 2]
+    assert [e["notes"] for e in bass_line(["E", "A", "B"], "root_octave")["per_chord"]] == [
+        ["E2", "E3"] * 2, ["A1", "A2"] * 2, ["B1", "B2"] * 2]
+    assert bass_line(["C"], "root_octave", octave=3)["track"]["notes"] == ["C2", "C3"] * 2
+    assert bass_line(["E"], "root_octave", octave=0)["track"]["notes"] == ["E1", "E2"] * 2   # E0 folded up
+
+
+def test_root_fifth_over_a_six_four_chord_alternates_with_the_root():
+    # the bass already is the fifth (C/G, G7/D): alternate with the root, never with the bass itself
+    r = bass_line(["C/G", "G7/D"], "root_fifth")
+    assert [e["notes"] for e in r["per_chord"]] == [["G2", "C2"], ["D2", "G1"]]
+    # a set with no fifth: the alternate is its root, which would fold onto the bass: an octave above
+    assert bass_line([["C1", "D1"]], "root_fifth", octave=1)["track"]["notes"] == ["C2", "C3"]
+
+
+def test_loop_ending_approaches_the_actual_first_note():
+    # the loop replays C2, so the closing approach resolves into C2, not into a C3 nearest the last note
+    assert bass_line(["C"], "walking")["track"]["notes"] == ["C2", "E2", "G2", "Db2"]
+    assert [e["notes"] for e in bass_line(["E", "A", "B", "E"], "approach")["per_chord"]] == [
+        ["E2", "G#2"], ["A2", "A#2"], ["B2", "D#3"], ["E3", "F2"]]
+    # E1 after F1: D#1 is below the register and F1 repeats the previous note, so the repeat is kept
+    assert [e["notes"] for e in bass_line(["Em7", "Fm7"], "approach", octave=1)["per_chord"]] == [
+        ["E1", "Gb1"], ["F1", "F1"]]
+    # G3 after F#3: Ab3 is above the register, so the walk repeats F#3 and resolves up into G3
+    assert bass_line(["G", "B"], "walking", octave=3)["per_chord"][1]["notes"] == ["B2", "D#3", "F#3", "F#3"]
+    # ending='root' still gives the last chord no approach
+    assert bass_line(["E", "A", "B", "E"], "approach", ending="root")["per_chord"][-1]["notes"] == ["E3", "E3"]
+
+
+def test_loop_seam_resolves_by_a_semitone_when_the_section_repeats(tmp_path):
+    import mido
+    from midi_composer_mcp.structure import render_song_structure
+
+    b = bass_line(["C", "Am", "F", "G"], "walking")
+    out = render_song_structure({"A": {"tracks": b["render_hint"]["tracks"]}}, form="A A",
+                                output_dir=str(tmp_path), file_name="loop.mid")
+    ons = [msg.note for track in mido.MidiFile(out["file"]).tracks for msg in track
+           if msg.type == "note_on" and msg.velocity > 0]
+    assert ons[:16] == ons[16:] == midis(b["track"]["notes"])
+    assert abs(ons[15] - ons[16]) == 1                        # Db2 -> C2 across the repeat
+
+
+def test_sustained_bass_never_holds_across_a_chord_change(tmp_path):
+    def events(result):
+        out = render_arrangement(result["render_hint"]["tracks"], output_dir=str(tmp_path))
+        return [(e["note"], e["start_beat"], e["duration_beats"]) for e in out["tracks"][-1]["events"]]
+
+    # a rhythm that rests on the downbeat: a held style is played detached over two or more chords
+    r = bass_line(["C", "Db"], "root", rhythm="..O.")
+    assert r["track"]["sustain"] is False
+    assert events(r) == [("C2", 2.0, 1.0), ("Db2", 6.0, 1.0)]
+    assert events(bass_line(["C", "G"], "approach", rhythm=".O.o")) == [
+        ("C2", 1.0, 1.0), ("Ab1", 3.0, 1.0), ("G1", 5.0, 1.0), ("B1", 7.0, 1.0)]
+    # the default rhythms open on the bass, so they stay held within each chord
+    assert events(bass_line(["C", "F"], "approach")) == [("C2", 0.0, 3.0), ("E2", 3.0, 1.0),
+                                                           ("F2", 4.0, 3.0), ("Db2", 7.0, 1.0)]
+    # asking for a hold that would cross the change is an error; sustain=False plays any style detached
+    with pytest.raises(ValueError, match="wrong chord"):
+        bass_line(["C", "Db"], "root", rhythm="..O.", sustain=True)
+    assert bass_line(["C", "F"], "root", sustain=False)["track"]["sustain"] is False
+    assert bass_line(["C", "F"], "walking", sustain=True)["track"]["sustain"] is True
+    # one chord (nothing to cross) and a pedal (the same note under every chord) keep their hold
+    assert bass_line(["C"], "root", rhythm="..O.")["track"]["sustain"] is True
+    assert bass_line(["C", "F"], "pedal", rhythm="..O.", sustain=True)["track"]["sustain"] is True
+    with pytest.raises(ValueError, match="sustain must be true or false"):
+        bass_line(["C", "F"], sustain="yes")
+
+
+def test_sustained_pattern_refuses_to_hold_across_a_chord_change():
+    with pytest.raises(ValueError, match="chord 1 \\(C\\) over the rest that opens chord 2 \\(B\\)"):
+        chord_pattern(["C", "B"], ". 1 2 3", beats_per_chord=2, sustain=True, smooth=False)
+    # continue: 1 2 | . 1 | 2 . — the second chord opens on the pattern's rest
+    with pytest.raises(ValueError, match="opens chord 2"):
+        chord_pattern(["C", "G", "Am"], "^1 2 .", beats_per_chord=1, step_beats=0.5, phase="continue",
+                      sustain=True)
+    # rests inside a chord hold within it; one chord has no change to cross; sustain off is untouched
+    assert chord_pattern(["C", "F"], "^1 . 3 .", beats_per_chord=2, sustain=True)["track"]["sustain"] is True
+    assert chord_pattern(["C"], ". 1 2 3", beats_per_chord=2, sustain=True)["track"]["notes"] == ["C4", "E4", "G4"]
+    assert chord_pattern(["C", "B"], ". 1 2 3", beats_per_chord=2, smooth=False)["track"]["rhythm"] == ".ooo" * 2
 
 
 def test_pedal_ignores_the_chords():
@@ -374,8 +463,8 @@ def test_walking_line_is_letter_spelled_in_every_key(tonic):
         app = parse_note(bar[3])
         assert (app.pitch_class - target.pitch_class) % 12 in (1, 11), (tonic, bar)
         assert (LETTERS.index(app.letter) - LETTERS.index(target.letter)) % 7 in (1, 6), (tonic, bar)
-        if k < 3:
-            assert abs(app.midi - parse_note(bars[k + 1][0]).midi) == 1   # it resolves by a semitone
+        nxt = bars[k + 1][0] if k < 3 else bars[0][0]   # the loop replays the first note
+        assert abs(app.midi - parse_note(nxt).midi) == 1, (tonic, bar)   # it resolves by a semitone
     assert all(BASS_LOW <= m <= BASS_HIGH for m in midis(r["track"]["notes"]))
 
 
@@ -389,6 +478,106 @@ def test_root_style_family_is_transposition_consistent(style):
             first = parse_note(entry["notes"][0]).without_octave().name
             expected = symbols[0] if style == "pedal" else sym
             assert first == parse_chord_symbol(expected)[0].name, (tonic, style)
+
+
+_LOOP_PROGRESSIONS = ["I vi IV V", "I V vi IV", "ii7 V7 Imaj7", "I VI7 ii7 V7", "vi IV I V", "I"]
+
+
+@pytest.mark.parametrize("tonic", TONICS)
+def test_loop_seam_resolves_into_the_first_note_in_every_key(tonic):
+    """ending='loop': the last note is a letter-neighbour semitone from the line's first note, in
+    every key, register and progression. It repeats the note before it only when the other side
+    is outside E1-G3 (E1 after F1, G3 after F#3)."""
+    for numerals in _LOOP_PROGRESSIONS:
+        symbols = roman_to_chords(numerals, tonic)["symbols"]
+        for style in ("walking", "approach"):
+            for octave in range(5):
+                for step in (1.0, 0.5):
+                    notes = [parse_note(n) for n in bass_line(symbols, style, octave=octave,
+                                                              step_beats=step)["track"]["notes"]]
+                    first, last, before = notes[0], notes[-1], notes[-2]
+                    where = (tonic, numerals, style, octave, step)
+                    assert abs(last.midi - first.midi) == 1, where
+                    assert (LETTERS.index(last.letter) - LETTERS.index(first.letter)) % 7 in (1, 6), where
+                    assert all(BASS_LOW <= n.midi <= BASS_HIGH for n in notes), where
+                    if last.midi == before.midi:
+                        other = 2 * first.midi - last.midi
+                        assert not BASS_LOW <= other <= BASS_HIGH, where
+
+
+@pytest.mark.parametrize("tonic", TONICS)
+def test_root_octave_pairs_are_octaves_in_every_key(tonic):
+    """Every root_octave pair is the bass and the same note exactly an octave up, inside E1-G3."""
+    for numerals in ("I IV V I", "I vi IV V", "ii7 V7 Imaj7", "I V6 vi IV64"):
+        symbols = roman_to_chords(numerals, tonic)["symbols"]
+        for octave in range(5):
+            r = bass_line(symbols, "root_octave", octave=octave)
+            for sym, entry in zip(symbols, r["per_chord"]):
+                low, high = midis(entry["notes"][0::2]), midis(entry["notes"][1::2])
+                assert len(set(low)) == 1 and len(set(high)) == 1, (tonic, sym, octave, entry)
+                assert high[0] - low[0] == 12, (tonic, sym, octave, entry)
+                assert BASS_LOW <= low[0] and high[0] <= BASS_HIGH, (tonic, sym, octave, entry)
+                assert {parse_note(n).name[:-1] for n in entry["notes"]} == {parse_chord_symbol(sym)[2].name
+                                                                             if parse_chord_symbol(sym)[2]
+                                                                             else parse_chord_symbol(sym)[0].name}
+
+
+@pytest.mark.parametrize("tonic", TONICS)
+def test_root_fifth_alternate_is_never_the_bass_itself_in_every_key(tonic):
+    """The alternate is the chord's fifth — or its root over a 6/4 — and never the bass's own pitch."""
+    for numerals in ("I64 V7 I", "IV64 I V65 I6", "I IV V I", "ii65 V43 I"):
+        symbols = roman_to_chords(numerals, tonic)["symbols"]
+        for octave in range(5):
+            r = bass_line(symbols, "root_fifth", octave=octave)
+            for sym, entry in zip(symbols, r["per_chord"]):
+                root, ctype, slash = parse_chord_symbol(sym)
+                bass, alt = parse_note(entry["notes"][0]), parse_note(entry["notes"][1])
+                fifth = next(t for (label, _), t in zip(ctype.degrees,
+                             __import__("midi_composer_mcp.chords", fromlist=["x"]).chord_notes(ctype, root))
+                             if label.lstrip("#b") == "5")
+                expected = root if fifth.pitch_class == bass.pitch_class else fifth
+                assert alt.name[:-1] == expected.name, (tonic, sym, octave, entry)
+                assert alt.midi != bass.midi and BASS_LOW <= alt.midi <= BASS_HIGH, (tonic, sym, octave, entry)
+
+
+_RHYTHMS = ["O...", ".O..", "..O.", "...O", "O.o.", ".o.o", "Oo.."]
+
+
+@pytest.mark.parametrize("tonic", TONICS)
+def test_no_bass_note_sounds_across_a_chord_change(tonic, tmp_path):
+    """Rendered, no bass event (bar the pedal's) starts under one chord and sounds into the next."""
+    symbols = roman_to_chords("I vi ii V", tonic)["symbols"]
+    for style in BASS_STYLES:
+        for rhythm in _RHYTHMS:
+            for sustain in (None, True, False):
+                try:
+                    r = bass_line(symbols, style, rhythm=rhythm, sustain=sustain)
+                except ValueError as e:
+                    assert sustain is True and rhythm[0] == "." and style != "pedal", e
+                    continue
+                out = render_arrangement(r["render_hint"]["tracks"], output_dir=str(tmp_path), file_name="b.mid")
+                for e in out["tracks"][0]["events"]:
+                    start, end = e["start_beat"], e["start_beat"] + e["duration_beats"]
+                    if style != "pedal":
+                        assert int(start // 4) == int((end - 1e-9) // 4), (tonic, style, rhythm, sustain, e)
+
+
+@pytest.mark.parametrize("phase", ["restart", "continue"])
+def test_no_sustained_pattern_note_sounds_across_a_chord_change(phase, tmp_path):
+    patterns = ["^1 . 3 .", ". 1 2 3", "^1 2 .", "1 . .", ". . 1", "^1 3 2 3", "1 2 3 . 2"]
+    for tonic in TONICS:
+        symbols = roman_to_chords("I vi IV V", tonic)["symbols"]
+        for pattern in patterns:
+            for bpc in (1, 1.5, 2):
+                try:
+                    r = chord_pattern(symbols, pattern, beats_per_chord=bpc, phase=phase, sustain=True)
+                except ValueError as e:
+                    assert "wrong chord" in str(e) or "no notes" in str(e), e
+                    continue
+                out = render_arrangement(r["render_hint"]["tracks"], output_dir=str(tmp_path), file_name="p.mid")
+                for e in out["tracks"][1]["events"]:
+                    start, end = e["start_beat"], e["start_beat"] + e["duration_beats"]
+                    assert int(start // bpc) == int((end - 1e-9) // bpc), (tonic, pattern, bpc, phase, e)
 
 
 def test_bass_and_pattern_chain_into_one_arrangement(tmp_path):
