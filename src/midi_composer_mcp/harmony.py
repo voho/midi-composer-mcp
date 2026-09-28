@@ -16,6 +16,7 @@ from .chords import (
     resolve_chord_type,
 )
 from .diatonic import _HARMONIC_FUNCTIONS, _ROMAN_BASE, roman_suffix
+from .diatonic import numeral_base as _numeral_base
 from .midi_io import _parse_chord_list, _with_octave, voice_chord
 from .notes import (
     LETTER_PCS, LETTERS, Note, best_spelling, parse_note, parse_notes, spell_pitch_class,
@@ -96,15 +97,6 @@ def interval_between(note_a: str, note_b: str) -> dict:
 
 # ----------------------------------------------------------- chord analysis
 
-# Fallback (spelling-blind) numerals, used only when the letter-based spelling
-# would need more than a double accidental.
-_REL_TO_ROMAN = {
-    0: ("I", ""), 1: ("II", "b"), 2: ("II", ""), 3: ("III", "b"), 4: ("III", ""),
-    5: ("IV", ""), 6: ("IV", "#"), 7: ("V", ""), 8: ("VI", "b"), 9: ("VI", ""),
-    10: ("VII", "b"), 11: ("VII", ""),
-}
-
-
 def _root_and_quality(item):
     """Resolve a chord (symbol or note array) to (root Note, ChordType, bass Note or None)."""
     if isinstance(item, str):
@@ -117,22 +109,6 @@ def _root_and_quality(item):
     m = next((m for m in res["matches"] if set(m["notes"]) == written), res["matches"][0])
     bass = parse_note(m["bass"]) if "bass" in m else None
     return parse_note(m["root"]), resolve_chord_type(m["chord_type"]), bass
-
-
-def _numeral_base(croot: Note, tonic: Note) -> tuple[str, str]:
-    """(numeral, accidental prefix) of a chord root, read from its spelling.
-
-    The numeral comes from the letter distance to the tonic and the accidental
-    from how far the root sits from the major-scale degree on that letter, so
-    Gb in C is bV and F# is #IV (matching diatonic_chords' numerals).
-    """
-    steps = (LETTERS.index(croot.letter) - LETTERS.index(tonic.letter)) % 7
-    rel = (croot.pitch_class - tonic.pitch_class) % 12
-    offset = (rel - MAJOR_DEGREES[steps] + 6) % 12 - 6
-    if abs(offset) <= 2:
-        return _ROMAN_BASE[steps], "#" * offset if offset > 0 else "b" * -offset
-    base, accidental = _REL_TO_ROMAN[rel]
-    return base, accidental
 
 
 def analyze_progression(chords, root: str, scale_type: str = "major") -> dict:

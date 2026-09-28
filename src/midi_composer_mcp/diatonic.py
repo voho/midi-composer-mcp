@@ -11,8 +11,8 @@ from __future__ import annotations
 import re
 
 from .chords import ChordType, identify_chord_quality, match_chords
-from .notes import Note, parse_notes, transpose
-from .scales import MAJOR_DEGREES, degree_labels, resolve_scale_type, scale_notes
+from .notes import LETTERS, Note, parse_note, parse_notes, transpose
+from .scales import MAJOR_DEGREES, ScaleType, degree_labels, resolve_scale_type, scale_notes
 
 _ROMAN_BASE = ("I", "II", "III", "IV", "V", "VI", "VII")
 _ROMAN_VALUES = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6, "vii": 7}
@@ -46,6 +46,149 @@ def roman_suffix(quality: ChordType | None, minor_numeral: bool) -> str:
     if minor_numeral and suffix.startswith("m") and not suffix.startswith(("maj", "m6")):
         suffix = suffix[1:]
     return suffix
+
+
+# Fallback (spelling-blind) numerals, used only when the letter-based spelling
+# would need more than a double accidental.
+_REL_TO_ROMAN = {
+    0: ("I", ""), 1: ("II", "b"), 2: ("II", ""), 3: ("III", "b"), 4: ("III", ""),
+    5: ("IV", ""), 6: ("IV", "#"), 7: ("V", ""), 8: ("VI", "b"), 9: ("VI", ""),
+    10: ("VII", "b"), 11: ("VII", ""),
+}
+
+
+def numeral_base(croot: Note, tonic: Note) -> tuple[str, str]:
+    """(numeral, accidental prefix) of a chord root, read from its spelling.
+
+    The numeral comes from the letter distance to the tonic and the accidental
+    from how far the root sits from the major-scale degree on that letter, so
+    Gb in C is bV and F# is #IV (matching diatonic_chords' numerals).
+    """
+    steps = (LETTERS.index(croot.letter) - LETTERS.index(tonic.letter)) % 7
+    rel = (croot.pitch_class - tonic.pitch_class) % 12
+    offset = (rel - MAJOR_DEGREES[steps] + 6) % 12 - 6
+    if abs(offset) <= 2:
+        return _ROMAN_BASE[steps], "#" * offset if offset > 0 else "b" * -offset
+    base, accidental = _REL_TO_ROMAN[rel]
+    return base, accidental
+
+
+# ------------------------------------------------ borrowing (modal interchange)
+
+# The parallel modes a chord can be borrowed from, in the fixed order that breaks
+# distance ties: the church modes from brightest to darkest, then the minor and
+# harmonic variants. Mixture from the parallel minor follows Aldwell & Schachter
+# and Kostka & Payne; the other modes follow Berklee modal interchange (Nettles &
+# Graf, The Chord Scale Theory & Jazz Harmony, 1997).
+PARALLEL_MODES = ("major", "lydian", "mixolydian", "dorian", "natural minor", "phrygian",
+                  "locrian", "harmonic minor", "melodic minor", "harmonic major")
+
+
+def _scale_pcs(scale: ScaleType, tonic_pc: int) -> frozenset[int]:
+    return frozenset((tonic_pc + i) % 12 for i in scale.intervals)
+
+
+def _mode_offset(scale: ScaleType) -> int:
+    """Signature offset of a heptatonic mode against major (dorian -2, lydian +1 ...)."""
+    if len(scale.intervals) != 7:
+        return 0
+    return sum(i - m for i, m in zip(scale.intervals, MAJOR_DEGREES))
+
+
+def _as_pitch_classes(notes) -> set[int]:
+    """Pitch classes of notes given as Note objects, note names or integers 0-11."""
+    if isinstance(notes, (str, Note)):
+        notes = [notes]
+    if not isinstance(notes, (list, tuple, set, frozenset)):
+        raise ValueError(f"Expected a list of notes or pitch classes, got {type(notes).__name__}")
+    pcs: set[int] = set()
+    for n in notes:
+        if isinstance(n, Note):
+            pcs.add(n.pitch_class)
+        elif isinstance(n, int) and not isinstance(n, bool):
+            pcs.add(n % 12)
+        elif isinstance(n, str):
+            pcs.add(parse_note(n).pitch_class)
+        else:
+            raise ValueError(f"Not a note or pitch class: {n!r}")
+    return pcs
+
+
+def borrowing_sources(tonic: str | Note, scale_type: str = "major", modes=None,
+                      fifths_steps: int = 0, include_home: bool = False) -> list[dict]:
+    """The scales a chord may be borrowed from, in source order, with their distance.
+
+    Sources are (0) the home scale itself, distance 0, only with `include_home`
+    (chord_palette's 'sources' lists it; borrowed_from never does), (1) parallel
+    modes on the same tonic — `modes` (a name or list),
+    by default PARALLEL_MODES — with the home mode itself omitted, then (2) for
+    `fifths_steps` n (0-6), the same mode on the keys 1..n steps round the
+    circle of fifths, in the order +1, -1, +2, -2 ... (C major: G major, F major,
+    D major, Bb major ...). A key's tonic is the home tonic moved 7k semitones
+    onto the fifth letter, respelled to a practical signature (circle._practical).
+
+    Each source is {label ('C dorian', 'G major'), tonic (Note), scale (ScaleType),
+    distance, pcs}. `distance` is how many of the source's pitch classes lie
+    outside the home scale (from C major: lydian, mixolydian, melodic minor and
+    harmonic major 1; dorian and harmonic minor 2; natural minor 3; phrygian 4;
+    locrian 5); a key k steps away has distance |k|. Pure set arithmetic.
+    """
+    from .circle import _practical  # circle has no dependency on this module
+
+    home = resolve_scale_type(scale_type)
+    home_tonic = (tonic if isinstance(tonic, Note) else parse_notes(tonic)[0]).without_octave()
+    home_pcs = _scale_pcs(home, home_tonic.pitch_class)
+    if modes is None:
+        modes = PARALLEL_MODES
+    elif isinstance(modes, str):
+        modes = [modes]
+    if not isinstance(modes, (list, tuple)):
+        raise ValueError(f"modes must be a scale name or a list of scale names, got {modes!r}")
+    if not isinstance(fifths_steps, int) or isinstance(fifths_steps, bool) or not 0 <= fifths_steps <= 6:
+        raise ValueError(f"fifths_steps must be an integer between 0 and 6, got {fifths_steps!r}")
+
+    sources: list[dict] = []
+    if include_home:
+        sources.append({"label": f"{home_tonic.pitch_class_name} {home.name}", "tonic": home_tonic,
+                        "scale": home, "distance": 0, "pcs": home_pcs})
+    seen: set[str] = set()
+    for mode in modes:
+        scale = resolve_scale_type(mode)
+        if scale.name == home.name or scale.name in seen:
+            continue
+        seen.add(scale.name)
+        pcs = _scale_pcs(scale, home_tonic.pitch_class)
+        sources.append({"label": f"{home_tonic.pitch_class_name} {scale.name}", "tonic": home_tonic,
+                        "scale": scale, "distance": len(pcs - home_pcs), "pcs": pcs})
+    for step in range(1, fifths_steps + 1):
+        for k in (step, -step):
+            key_tonic = transpose(home_tonic, 7 * k, 4 * k)
+            key_tonic = _practical(key_tonic, _mode_offset(home)).without_octave()
+            label = f"{key_tonic.pitch_class_name} {home.name}"
+            if any(s["label"] == label for s in sources):
+                continue  # six steps both ways can land on one spelling (F# +-6 -> C)
+            sources.append({"label": label, "tonic": key_tonic, "scale": home, "distance": abs(k),
+                            "pcs": _scale_pcs(home, key_tonic.pitch_class)})
+    return sources
+
+
+def borrowed_sources(notes, tonic: str | Note, scale_type: str = "major", modes=None,
+                     fifths_steps: int = 0, include_home: bool = False) -> list[str]:
+    """Label every borrowing source whose pitch set holds all of `notes` ('C natural minor', ...).
+
+    `notes` are the chord tones plus the bass (Note objects, names or pitch
+    classes 0-11). The candidates are borrowing_sources(tonic, scale_type,
+    modes, fifths_steps) — by default the ten PARALLEL_MODES on the same tonic,
+    home mode omitted — and the result is sorted by (distance from the home
+    scale, source order). The one rule shared by roman_to_chords' borrowed_from,
+    analyze_progression's borrowed_from and chord_palette's sources, so they
+    never disagree. e.g. Fm (F Ab C) in C major -> ['C harmonic major',
+    'C harmonic minor', 'C natural minor', 'C phrygian', 'C locrian'].
+    """
+    pcs = _as_pitch_classes(notes)
+    sources = borrowing_sources(tonic, scale_type, modes, fifths_steps, include_home)
+    hits = [(s["distance"], i, s["label"]) for i, s in enumerate(sources) if pcs <= s["pcs"]]
+    return [label for _, _, label in sorted(hits)]
 
 
 def _roman_numeral(index: int, intervals: tuple[int, ...], quality: ChordType | None,
@@ -174,6 +317,7 @@ def _parse_degree(token: int | str, intervals: tuple[int, ...]) -> int:
                     f"Chromatic alterations are not supported in degree sequences: {token!r}."
                     f" Degrees are positions in the chosen scale (1-{count}); an accidental is"
                     f" only accepted when it names the scale's own degree (bVI in natural minor)."
+                    f" For chromatic numerals (bVII in major, V7/V, N6) use roman_to_chords."
                 )
     else:
         raise ValueError(f"Invalid scale degree: {token!r} (use an integer or a roman numeral)")
@@ -182,18 +326,88 @@ def _parse_degree(token: int | str, intervals: tuple[int, ...]) -> int:
     return degree
 
 
+def split_tokens(text: str, bar_lines: bool = False) -> list[str]:
+    """Split a degree / numeral string into tokens.
+
+    Separators are commas, whitespace and dashes *between* tokens ('1-5-6-4',
+    'ii–V–I'); a leading '-' stays on its number so '-1' is rejected, not read
+    as 1, and a free-standing dash ('I - V') is dropped. With `bar_lines`, '|'
+    separates too ('I V | vi IV').
+    """
+    pattern = r"[,\s|]+|(?<=\S)[-–—](?=\S)|[–—]" if bar_lines else r"[,\s]+|(?<=\S)[-–—](?=\S)|[–—]"
+    tokens = re.split(pattern, text.strip())
+    return [t for t in tokens if t and not re.fullmatch(r"[-–—]+", t)]  # 'I - V - vi - IV'
+
+
+def _chord_label(entry: dict) -> str:
+    symbol = entry["symbol"]
+    return symbol if isinstance(symbol, str) else " ".join(symbol)
+
+
+def _degree_warning(token, entry: dict, root: str, scale: ScaleType, sevenths: bool) -> str | None:
+    """A note when a numeral token says more than degrees_to_chords used (case, mark, figure).
+
+    degrees_to_chords reads a numeral as a *position* only. For 7-note scales the
+    token is also read the way roman_to_chords reads it; when the two chords
+    differ (other notes, or another bass) the caller is told. A bare triad
+    numeral with sevenths=true is compared by its triad, so 'V' -> G7 is silent.
+    """
+    if not isinstance(token, str):
+        return None
+    text = token.strip()
+    m = re.match(r"^([#b]*)(\d+|[ivIV]+)(.*)$", text)
+    if not m or m.group(2).isdigit():
+        return None  # a plain degree number carries no quality to ignore
+    suffix = m.group(3)
+    label = _chord_label(entry)
+    have = [parse_note(n) for n in entry["notes"]]
+    have_bass = parse_note(entry["bass"]) if "bass" in entry else have[0]
+    if len(scale.intervals) == 7:
+        from .roman import roman_to_chords  # roman imports this module at load time
+
+        try:
+            reading = roman_to_chords([text], root, scale.name)["chords"][0]
+        except ValueError as e:
+            if "?" in suffix:
+                return None  # diatonic_chords' own marker for an unnamed stacked chord
+            return (f"{text} resolved to {label} (the scale's own chord); its '{suffix}' was ignored"
+                    f" (roman_to_chords rejects this numeral: {e})")
+        want = {parse_note(n).pitch_class for n in reading["notes"]}
+        want_bass = parse_note(reading["bass"]).pitch_class
+        compare = have[:3] if sevenths and len(want) == 3 and len(have) == 4 else have
+        if {n.pitch_class for n in compare} == want and have_bass.pitch_class == want_bass:
+            return None
+        wanted = f"{reading['root']} {reading['chord_type']}"
+        if reading["inversion"]:
+            wanted += f" over {reading['bass']}"
+        return f"{text} resolved to {label} (the scale's own chord); for {wanted} use roman_to_chords"
+    # other scales: no Roman-numeral dialect, so flag an ignored suffix or a case mismatch
+    if suffix.strip("?"):
+        return (f"{text} resolved to {label} (the scale's own chord); its '{suffix}' was ignored"
+                f" (degrees are positions in the scale)")
+    chord_root = parse_note(entry["root"]).pitch_class
+    rel = {(n.pitch_class - chord_root) % 12 for n in have}
+    lower = m.group(2).islower()
+    if (lower and 4 in rel and 3 not in rel) or (not lower and 3 in rel and 4 not in rel):
+        return (f"{text} resolved to {label} (the scale's own chord); the numeral's case"
+                f" ({'minor' if lower else 'major'}) was ignored")
+    return None
+
+
 def degrees_to_chords(root: str, scale_type: str, degrees, sevenths: bool = False) -> dict:
     """Resolve a degree sequence (e.g. [1, 5, 6, 4] or 'I V vi IV') to chords.
 
     The caller chooses the sequence; this only maps each degree to the chord
-    that the scale defines there.
+    that the scale defines there. Numerals are *positions*: 'iv' in C major is
+    still F, and 'V7' without sevenths=true is still G. `warnings` lists one
+    note per token whose case, quality mark, accidental or figure was ignored,
+    e.g. "iv resolved to F (the scale's own chord); for F minor use
+    roman_to_chords" — roman_to_chords reads numerals literally (iv = Fm, bVII,
+    V7/V, N6, inversions).
     """
     scale = resolve_scale_type(scale_type)
     if isinstance(degrees, (int, str)) and not isinstance(degrees, bool):
-        # separators: commas, spaces, and dashes *between* tokens ('1-5-6-4', 'ii–V–I');
-        # a leading '-' stays on the number so '-1' is rejected, not read as 1
-        tokens = re.split(r"[,\s]+|(?<=\S)[-–—](?=\S)|[–—]", str(degrees).strip())
-        degrees = [t for t in tokens if t and not re.fullmatch(r"[-–—]+", t)]  # 'I - V - vi - IV'
+        degrees = split_tokens(str(degrees))
     if not isinstance(degrees, (list, tuple)) or not degrees:
         raise ValueError("degrees must be a non-empty list like [1, 5, 6, 4] or 'I V vi IV'")
     indices = [_parse_degree(t, scale.intervals) for t in degrees]
@@ -201,6 +415,8 @@ def degrees_to_chords(root: str, scale_type: str, degrees, sevenths: bool = Fals
     base = diatonic_chords(root, scale_type, sevenths)
     by_degree = {c["degree"]: c for c in base["chords"]}
     progression = [dict(by_degree[d]) for d in indices]
+    warnings = [w for t, c in zip(degrees, progression)
+                if (w := _degree_warning(t, c, root, scale, sevenths)) is not None]
     return {
         "root": base["root"],
         "scale_type": base["scale_type"],
@@ -208,4 +424,5 @@ def degrees_to_chords(root: str, scale_type: str, degrees, sevenths: bool = Fals
         "sevenths": sevenths,
         "chords": progression,
         "symbols": [c["symbol"] for c in progression],
+        "warnings": warnings,
     }
