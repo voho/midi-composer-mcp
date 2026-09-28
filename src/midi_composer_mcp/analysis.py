@@ -1,4 +1,4 @@
-"""Reading a draft back: key finding and a voice-leading lint.
+"""Reading a draft back: key finding, a voice-leading lint and cadence labels.
 
 The generators write music; these tools read it back so the LLM can check that
 a draft does what it intended:
@@ -13,6 +13,10 @@ a draft does what it intended:
   overlap, melodic and key-dependent rules, with the motion types of music21's
   voiceLeading.VoiceLeadingQuartet. Its MIDI-level facts come from the same
   predicates bach_chorale_voicing uses, so the two tools cannot disagree.
+- find_cadences: labels the cadence at each phrase end (authentic perfect /
+  imperfect, half, Phrygian half, plagal, deceptive) by the textbook rules of
+  Kostka, Payne & Almén, Caplin and Aldwell & Schachter, reading every chord
+  through analyze_progression so the two tools agree.
 
 Everything here is deterministic.
 """
@@ -23,13 +27,17 @@ import math
 
 from .chords import chord_notes
 from .circle import _fifths, _practical
+from .diatonic import roman_suffix
 from .generate import RHYTHM_REST, parse_rhythm
-from .harmony import _root_and_quality, interval_between
+from .harmony import (
+    _FIGURE_MARKS, _bass_degree, _chord_items, _root_and_quality, analyze_progression, interval_between,
+)
 from .masters import RANGES, _VOICES, _consecutive_perfect, _direct_perfect, _overlap, _roles
-from .midi_io import TICKS_PER_BEAT, _check_range, _parse_chord_list, build_track_events
+from .midi_io import TICKS_PER_BEAT, _check_range, _parse_chord_list, assign_octaves, build_track_events
 from .notes import (
     LETTER_PCS, LETTERS, Note, note_from_midi, parse_note, parse_notes, spelling_for_pcs, transpose,
 )
+from .roman import _is_above, read_chord
 from .scales import resolve_scale_type
 
 # ================================================================ detect_key
@@ -742,3 +750,351 @@ def _leap_warnings(line, v, warnings, slices):
             warnings.append({"index": k2, "voices": [v], "rule": "leap_not_recovered",
                              "message": f"{slices[k1][v].name} -> {slices[k2][v].name}: a leap of {abs(leap)} "
                                         "semitones not followed by a step back"})
+
+
+# ============================================================= find_cadences
+
+CADENCE_TYPES = ("authentic", "half", "plagal", "deceptive", "none")
+_CAPLIN_HC = "Caplin: a half cadence ends on a root-position dominant triad"
+_ASK_SOPRANO = "give the soprano to decide PAC vs IAC"
+_LEADING_TONE_TYPES = ("diminished", "diminished 7", "half-diminished")
+_FIRST_INVERSION = ("6", "65")      # analyze_progression's figure when the bass is the chord's third
+_PLAGAL_FIGURES = ("", "7", "6", "65")
+_AUGMENTED_SIXTHS = ("It6", "Fr43", "Ger65", "Sw43")
+# The roots the cadence rules look for, as a spelled (semitones, letter steps) interval above the tonic.
+_ON_1, _ON_4, _ON_5, _ON_b6, _ON_6, _ON_7 = (0, 0), (5, 3), (7, 4), (8, 5), (9, 5), (11, 6)
+
+
+def _cadence_reading(reading: dict, tonic: Note, minor: bool) -> dict:
+    """A read_chord reading -> its third, root position and cadence family (letters + semitones).
+
+    Families: 'dominant' (root on ^5, major 3rd), 'leading-tone' (dim/dim7/m7b5 a spelled m2 below
+    the tonic), 'tonic' (root on ^1, major or minor 3rd and perfect 5th: the triad or its 6th/7th
+    chords), 'iv' (the same on ^4), 'submediant' (minor on ^6 in a major key, major on b6 in a minor
+    key) and 'bVI' (major on b6 in a major key); None otherwise.
+    """
+    root, ctype, bass = reading["root"], reading["chord_type"], reading["bass"]
+    degrees = dict(ctype.degrees) if ctype is not None else {}
+    third = "major" if degrees.get("3") == 4 else "minor" if degrees.get("b3") == 3 else None
+    triadic = third is not None and degrees.get("5") == 7
+
+    def on(at):
+        return root is not None and _is_above(root, tonic, *at)
+
+    family = None
+    if on(_ON_5) and third == "major":
+        family = "dominant"
+    elif on(_ON_7) and ctype.name in _LEADING_TONE_TYPES:
+        family = "leading-tone"
+    elif triadic and on(_ON_1):
+        family = "tonic"
+    elif triadic and on(_ON_4):
+        family = "iv"
+    elif triadic and ((minor and on(_ON_b6) and third == "major") or (not minor and on(_ON_6) and third == "minor")):
+        family = "submediant"
+    elif triadic and not minor and on(_ON_b6) and third == "major":
+        family = "bVI"
+    return {"root": root, "ctype": ctype, "bass": bass, "third": third, "family": family,
+            "root_position": root is not None and bass.pitch_class == root.pitch_class,
+            "minor_v": on(_ON_5) and third == "minor", "minor_seventh": degrees.get("b7") == 10}
+
+
+def _spelling_caveat(root: Note | None, tonic: Note, intervals) -> str | None:
+    """A caveat when a root sounds like a cadence degree but is spelled as another (Gb in F#)."""
+    if root is None:
+        return None
+    rel = (root.pitch_class - tonic.pitch_class) % 12
+    for semis, steps in (_ON_1, _ON_4, _ON_5, _ON_b6, _ON_6, _ON_7):
+        if rel == semis and not _is_above(root, tonic, semis, steps):
+            expected = transpose(tonic, semis, steps)
+            label = _bass_degree(expected, tonic, intervals)
+            return (f"{root.name} is spelled as another degree than {expected.name} (^{label}): cadence roles "
+                    f"are read by letter, so respell it to count as ^{label}")
+    return None
+
+
+def _completed_array(item) -> list[str] | None:
+    """A note array no table chord matches, with its omitted fifth restored — the omission
+    four-part writing allows, read by check_voice_leading's rule (_slice_chord): G2 B3 F4 G4 is G7,
+    C3 C4 E4 C5 is C. Returns the octave-less notes, bass first, or None when that reads no chord.
+    """
+    notes = list(dict.fromkeys(parse_notes(list(item))))
+    if len(notes) > 6:
+        return None
+    if any(x.octave is None for x in notes):   # no octaves: the first note is the bass (read_chord)
+        notes = assign_octaves(list(dict.fromkeys(x.without_octave() for x in notes)), 2, "ascending")
+    found = _slice_chord(notes)
+    if found is None:
+        return None
+    names = list(dict.fromkeys(x.without_octave().name for x in sorted(notes, key=lambda x: x.midi)))
+    fifth = transpose(found[0], 7, 4)
+    if all(parse_note(x).pitch_class != fifth.pitch_class for x in names):
+        names.append(fifth.name)
+    return names
+
+
+def _tonic_roman(ctype, figure: str | None) -> str:
+    """A major-third tonic written as I in roman_to_chords' dialect ('I', 'I6', 'I7', 'IΔ7')."""
+    if figure is not None and ctype.name in _FIGURE_MARKS:
+        return f"I{_FIGURE_MARKS[ctype.name]}{figure}"
+    return f"I{roman_suffix(ctype, False)}"
+
+
+def _soprano_line(soprano, items: list) -> list[Note | None]:
+    """The soprano note of every chord: the `soprano` argument, else a note array's highest pitch."""
+    n = len(items)
+    if soprano is not None:
+        line = assign_octaves(parse_notes(soprano), 4, "nearest")
+        if len(line) != n:
+            raise ValueError(f"soprano has {len(line)} notes but there are {n} chords (one soprano note per chord)")
+        return line
+    out: list[Note | None] = []
+    for item in items:
+        if isinstance(item, (list, tuple)):
+            notes = parse_notes(list(item))
+            if all(x.octave is not None for x in notes):
+                out.append(max(notes, key=lambda x: x.midi))
+                continue
+        out.append(None)
+    return out
+
+
+def _phrase_end_indices(phrase_ends, phrase_length, n: int) -> tuple[list[int], bool]:
+    """(sorted phrase-end indices, whether this is an 'all' scan)."""
+    if phrase_length is None:
+        phrase_length = 0
+    if not isinstance(phrase_length, int) or isinstance(phrase_length, bool):
+        raise ValueError(f"phrase_length must be a whole number of chords (0 = not used), got {phrase_length!r}")
+    if phrase_length < 0:
+        raise ValueError(f"phrase_length must be 0 or more, got {phrase_length}")
+    if phrase_ends is not None and phrase_length:
+        raise ValueError("give phrase_ends or phrase_length, not both")
+    if phrase_length:
+        if phrase_length > n:
+            raise ValueError(f"phrase_length {phrase_length} is longer than the progression ({n} chords)")
+        return list(range(phrase_length - 1, n, phrase_length)), False
+    if phrase_ends is None:
+        return [n - 1], False
+    if isinstance(phrase_ends, str):
+        if phrase_ends.strip().lower() == "all":
+            return list(range(n)), True
+        raise ValueError(f"phrase_ends must be a list of 0-based chord indices or 'all', got {phrase_ends!r}")
+    if not isinstance(phrase_ends, (list, tuple)) or not phrase_ends:
+        raise ValueError("phrase_ends must be a non-empty list of 0-based chord indices, or 'all'")
+    for e in phrase_ends:
+        if not isinstance(e, int) or isinstance(e, bool):
+            raise ValueError(f"phrase_ends holds 0-based chord indices (integers), got {e!r}")
+        if not 0 <= e < n:
+            raise ValueError(f"phrase end {e} is out of range: there are {n} chords (indices 0-{n - 1})")
+    return sorted(set(phrase_ends)), False
+
+
+def find_cadences(chords, root: str, scale_type: str = "major", soprano=None, phrase_ends=None,
+                  phrase_length: int = 0) -> dict:
+    """Label the cadence at each phrase end: authentic (perfect/imperfect), half, plagal, deceptive or none.
+
+    A textbook codification — Kostka, Payne & Almén, Tonal Harmony, ch. 10
+    "Cadences, Phrases, and Periods" (PAC/IAC/HC/plagal/deceptive, Phrygian HC);
+    William E. Caplin, Classical Form (1998) (a half cadence ends on a
+    root-position dominant triad; the cadential 6/4); Aldwell & Schachter,
+    Harmony and Voice Leading (V–IV6 deceptive motion, the Picardy third). It is
+    not music21, which has cadence primitives but no classifier.
+
+    `chords`: symbols or note arrays (a string splits on spaces/commas), read by
+    analyze_progression (degree, figure, specials such as Cad64); a note array
+    no table chord matches is read with its omitted fifth restored, as
+    check_voice_leading reads four-part writing (G2 F3 B3 G4 = V7, C3 C4 E4 C5
+    = I), so bach_chorale_voicing's SATB rows read as written. `root` /
+    `scale_type`: a seven-note key; its mode is major when the scale's 3rd is 4
+    semitones, else minor. Chord roots are judged by letter AND semitones from
+    the tonic (Ab in C is b6, G# is not; a misspelled root gets a caveat).
+
+    Families: DOMINANT = root on ^5 with a major 3rd (V, V7, V9 …);
+    LEADING-TONE = a dim / dim7 / m7b5 chord a semitone below the tonic (the
+    raised 7th in minor); TONIC = root on ^1 with a major or minor 3rd and a
+    perfect 5th (its 6th/7th chords too); IV = the same on ^4; SUBMEDIANT =
+    minor on ^6 in a major key, major on b6 in a minor key.
+
+    Phrase ends (0-based chord indices): `phrase_ends` as a list; or 'all'
+    (scan every chord, reporting authentic, plagal and deceptive cadences
+    anywhere, a half cadence or 'none' only at the last chord); or
+    `phrase_length` L > 0 (indices L−1, 2L−1, …; e.g. from plan_sections'
+    section lengths); default the last chord. Not both.
+
+    Soprano per chord: `soprano` (one note per chord — pass
+    bach_chorale_voicing(...)['voices']['soprano'] or a melody), else a note
+    array's highest pitch when all its notes carry octaves (its lowest is the
+    bass), else unknown. `soprano` in the result shows the reading.
+
+    Rules at end e (P = chord e−1, F = chord e; first match wins):
+    1 authentic — P dominant or leading-tone, F tonic. 'perfect' only when P is
+      a root-position dominant, F is in root position AND F's soprano is ^1;
+      else 'imperfect' with reason 'leading-tone chord', or 'inversion' and/or
+      'soprano on ^3' ('; '-joined). Soprano unknown and both in root position:
+      subtype null, reason 'give the soprano to decide PAC vs IAC' — never a
+      PAC without ^1.
+    2 plagal — P on ^4 (IV/iv in root position or 6), F tonic in root position.
+    3 deceptive — P dominant, F submediant (subtype null), a major-key bVI
+      ('bVI') or IV/iv in first inversion ('IV6', Aldwell & Schachter).
+    4 half — F dominant; 'phrygian' in a minor key when P is iv6 (b6 in the
+      bass falling a semitone to ^5). An inverted V or a V7 is still a half
+      cadence, with the caveat 'Caplin: a half cadence ends on a root-position
+      dominant triad'.
+    5 none — with a reason ('ends on vi', 'a minor v has no leading tone' …).
+    cadential_64: a Cad64 before the dominant (authentic and deceptive: chord
+    e−2, and the span starts there; half: chord e−1). picardy: a major-3rd tonic
+    ending in a minor key (its roman is written I, not analyze_progression's
+    context-free V/iv). A tonic with a minor 7th gets a blues-tonic caveat.
+
+    Returns {key, phrase_ends, soprano, cadences: [{index, type, subtype,
+    reason, span [start, end], chords, romans (roman_figured, which
+    roman_to_chords reads back), soprano_degrees, bass_degrees (scale degrees,
+    '#7' off the scale, null unknown), soprano_checked, cadential_64, picardy,
+    caveats}], summary {type: count}} — the report shape of check_melody.
+    e.g. find_cadences('C F C/G G7 C', 'C', soprano='E5 F5 E5 D5 C5') -> index
+    4 authentic perfect, span [2, 4], romans Cad64 V7 I, soprano_degrees
+    [3, 2, 1], cadential_64 true. Deterministic.
+    """
+    if not isinstance(root, str):
+        raise ValueError(f"root must be a note name like 'C' or 'F#', got {root!r}")
+    scale = resolve_scale_type(scale_type)
+    intervals = scale.intervals
+    if len(intervals) != 7:
+        raise ValueError(f"find_cadences needs a seven-note key (major, minor or a mode); "
+                         f"{scale.name} has {len(intervals)} notes")
+    items = _chord_items(chords)
+    analysis = analyze_progression(items, root, scale.name)
+    heard = list(items)
+    for i, (item, entry) in enumerate(zip(items, analysis["chords"])):
+        if entry["chord_type"] == "unknown" and entry.get("special") is None:
+            heard[i] = _completed_array(item) or item
+    if heard != items:   # read again, so a Cad64 before a completed V7 is found too
+        analysis = analyze_progression(heard, root, scale.name)
+    tonic = parse_notes(root)[0].without_octave()
+    minor = intervals[2] != 4
+    n = len(items)
+    info = [_cadence_reading(read_chord(item), tonic, minor) for item in heard]
+    for chord, entry in zip(info, analysis["chords"]):
+        if entry.get("special") == "Cad64":
+            # a cadential 6/4 embellishes the dominant after it (Aldwell & Schachter): no tonic arrival
+            chord["family"] = "cadential 6/4"
+        elif entry.get("special") in _AUGMENTED_SIXTHS:
+            chord["family"] = None   # an augmented sixth (Ab C Eb F#) is no bVI, whatever its table reading
+    sop = _soprano_line(soprano, items)
+    ends, scan_all = _phrase_end_indices(phrase_ends, phrase_length, n)
+    written = [item if isinstance(item, str) else [x.name for x in parse_notes(list(item))] for item in items]
+
+    cadences = []
+    for e in ends:
+        cad = _cadence_at(e, info, analysis["chords"], written, sop, tonic, intervals, minor)
+        if scan_all and e != n - 1 and cad["type"] in ("half", "none"):
+            continue   # an 'all' scan reports half cadences (and 'none') only at the last chord
+        cadences.append(cad)
+    summary = {t: 0 for t in CADENCE_TYPES}
+    for cad in cadences:
+        summary[cad["type"]] += 1
+    return {
+        "key": analysis["key"],
+        "phrase_ends": [cad["index"] for cad in cadences],
+        "soprano": [x.name if x is not None else None for x in sop],
+        "cadences": cadences,
+        "summary": summary,
+    }
+
+
+def _cadence_at(e: int, info: list[dict], analysed: list[dict], written: list, sop: list, tonic: Note,
+                intervals, minor: bool) -> dict:
+    fin = info[e]
+    picardy = minor and fin["family"] == "tonic" and fin["third"] == "major"
+
+    def roman(i):
+        if i == e and picardy:
+            return _tonic_roman(fin["ctype"], analysed[i]["figure"])
+        a = analysed[i]
+        return a["roman_figured"] if a["roman_figured"] is not None else a["roman"]
+
+    def degree(note):
+        return _bass_degree(note, tonic, intervals)
+
+    kind, subtype, cad64, caveats = "none", None, False, []
+    start = max(e - 1, 0)
+    if e == 0:
+        reason = "no chord before it"
+    else:
+        pre = info[e - 1]
+        pr, fr = roman(e - 1), roman(e)
+        dominant_before = e >= 2 and pre["family"] == "dominant" and analysed[e - 2].get("special") == "Cad64"
+        if pre["family"] in ("dominant", "leading-tone") and fin["family"] == "tonic":
+            kind = "authentic"
+            if pre["family"] == "leading-tone":
+                subtype, reason = "imperfect", "leading-tone chord"
+            else:
+                why = []
+                if not (pre["root_position"] and fin["root_position"]):
+                    why.append("inversion")
+                if sop[e] is not None and sop[e].pitch_class != tonic.pitch_class:
+                    why.append(f"soprano on ^{degree(sop[e])}")
+                if why:
+                    subtype, reason = "imperfect", "; ".join(why)
+                elif sop[e] is None:
+                    reason = _ASK_SOPRANO
+                else:
+                    subtype, reason = "perfect", f"root-position {pr} -> {fr} with ^1 in the soprano"
+            cad64 = dominant_before
+        elif (pre["family"] == "iv" and analysed[e - 1]["figure"] in _PLAGAL_FIGURES
+              and fin["family"] == "tonic" and fin["root_position"]):
+            kind, reason = "plagal", f"{pr} -> {fr}"
+        elif pre["family"] == "dominant" and (fin["family"] in ("submediant", "bVI") or (
+                fin["family"] == "iv" and analysed[e]["figure"] in _FIRST_INVERSION)):
+            kind = "deceptive"
+            subtype = {"bVI": "bVI", "iv": "IV6"}.get(fin["family"])
+            reason = f"{pr} -> {fr} instead of {'i' if minor else 'I'}"
+            cad64 = dominant_before
+        elif fin["family"] == "dominant":
+            kind = "half"
+            if (minor and pre["family"] == "iv" and pre["third"] == "minor"
+                    and analysed[e - 1]["figure"] in _FIRST_INVERSION and fin["root_position"]):
+                subtype = "phrygian"
+                reason = (f"{pr} -> {fr}: the bass falls a semitone, ^{degree(pre['bass'])} -> "
+                          f"^{degree(fin['bass'])}")
+            else:
+                reason = f"ends on {fr}"
+            if not fin["root_position"] or fin["ctype"].name != "major":
+                caveats.append(_CAPLIN_HC)
+            cad64 = analysed[e - 1].get("special") == "Cad64"
+        elif fin["family"] == "tonic":
+            if pre["minor_v"]:
+                reason = f"{pr} -> {fr}: a minor v has no leading tone"
+            elif pre["family"] == "iv":
+                reason = f"{pr} -> {fr}: a plagal cadence needs IV/iv in root position or 6 and a root-position tonic"
+            else:
+                reason = f"{pr} -> {fr}: the tonic is not approached from V, vii° or IV"
+        elif fin["family"] == "cadential 6/4":
+            reason = f"ends on {fr}: a cadential 6/4 embellishes the dominant that follows; end the phrase on that V"
+        else:
+            reason = f"ends on {fr}"
+        if cad64 and kind != "half":
+            start = e - 2
+    span = range(start, e + 1)
+    for i in (e - 1, e) if e else (e,):
+        note = _spelling_caveat(info[i]["root"], tonic, intervals)
+        if note is not None and note not in caveats:
+            caveats.append(note)
+    if fin["family"] == "tonic" and fin["third"] == "major" and fin["minor_seventh"]:
+        caveats.append("a dominant seventh on the tonic: a blues tonic; common-practice harmony hears it as an "
+                       "applied V7 of the subdominant")
+    return {
+        "index": e,
+        "type": kind,
+        "subtype": subtype,
+        "reason": reason,
+        "span": [start, e],
+        "chords": [written[i] for i in span],
+        "romans": [roman(i) for i in span],
+        "soprano_degrees": [degree(sop[i]) if sop[i] is not None else None for i in span],
+        "bass_degrees": [degree(info[i]["bass"]) for i in span],
+        "soprano_checked": sop[e] is not None,
+        "cadential_64": cad64,
+        "picardy": picardy,
+        "caveats": caveats,
+    }
