@@ -1,0 +1,744 @@
+"""Reading a draft back: key finding and a voice-leading lint.
+
+The generators write music; these tools read it back so the LLM can check that
+a draft does what it intended:
+
+- detect_key: the Krumhansl–Schmuckler key-finding algorithm (Pearson
+  correlation of a duration-weighted pitch-class histogram with a key profile),
+  with the five profiles and the tonal-certainty measure exactly as music21
+  implements them (analysis/discrete.py and key.py, BSD-3), and windowed key
+  regions after music21's WindowedAnalysis.
+- check_voice_leading: lints the caller's own parts (note lists, voicings or
+  notes tracks) for parallel/contrary/direct fifths and octaves, crossing,
+  overlap, melodic and key-dependent rules, with the motion types of music21's
+  voiceLeading.VoiceLeadingQuartet. Its MIDI-level facts come from the same
+  predicates bach_chorale_voicing uses, so the two tools cannot disagree.
+
+Everything here is deterministic.
+"""
+
+from __future__ import annotations
+
+import math
+
+from .chords import chord_notes
+from .circle import _fifths, _practical
+from .generate import RHYTHM_REST, parse_rhythm
+from .harmony import _root_and_quality, interval_between
+from .masters import RANGES, _VOICES, _consecutive_perfect, _direct_perfect, _overlap, _roles
+from .midi_io import TICKS_PER_BEAT, _check_range, _parse_chord_list, build_track_events
+from .notes import (
+    LETTER_PCS, LETTERS, Note, note_from_midi, parse_note, parse_notes, spelling_for_pcs, transpose,
+)
+from .scales import resolve_scale_type
+
+# ================================================================ detect_key
+
+# Key profiles, index 0 = the tonic, then chromatically upwards. Copied verbatim from
+# music21 analysis/discrete.py (KrumhanslKessler, TemperleyKostkaPayne, BellmanBudge,
+# AardenEssen, SimpleWeights), (c) Michael Scott Asato Cuthbert and the music21 project, BSD-3.
+PROFILES: dict[str, dict] = {
+    "krumhansl": {
+        "name": "Krumhansl–Kessler (1982)",
+        "major": (6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88),
+        "minor": (6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17),
+    },
+    "temperley": {
+        "name": "Temperley–Kostka–Payne (Temperley 2007)",
+        "major": (0.748, 0.060, 0.488, 0.082, 0.670, 0.460, 0.096, 0.715, 0.104, 0.366, 0.057, 0.400),
+        "minor": (0.712, 0.084, 0.474, 0.618, 0.049, 0.460, 0.105, 0.747, 0.404, 0.067, 0.133, 0.330),
+    },
+    "bellman": {
+        "name": "Bellman–Budge (Bellman 2005)",
+        "major": (16.80, 0.86, 12.95, 1.41, 13.49, 11.93, 1.25, 20.28, 1.80, 8.04, 0.62, 10.57),
+        "minor": (18.16, 0.69, 12.99, 13.34, 1.07, 11.15, 1.38, 21.07, 7.49, 1.53, 0.92, 10.21),
+    },
+    "aarden": {
+        "name": "Aarden–Essen (Aarden 2003)",
+        "major": (17.7661, 0.145624, 14.9265, 0.160186, 19.8049, 11.3587, 0.291248, 22.062, 0.145624,
+                  8.15494, 0.232998, 4.95122),
+        "minor": (18.2648, 0.737619, 14.0499, 16.8599, 0.702494, 14.4362, 0.702494, 18.6161, 4.56621,
+                  1.93186, 7.37619, 1.75623),
+    },
+    "simple": {
+        "name": "Simple weights (Sapp 2011)",
+        "major": (2, 0, 1, 0, 1, 1, 0, 2, 0, 1, 0, 1),
+        "minor": (2, 0, 1, 1, 0, 1, 0, 2, 1, 0, 0.5, 0.5),
+    },
+}
+_MODES = ("major", "minor")
+_SCALE_OF_MODE = {"major": "major", "minor": "natural minor"}
+_MAX_WINDOWS = 2000
+_TRACK_STEP_BEATS = 0.5      # arrange_to_midi's defaults, so tracks are timed as they render
+_TRACK_BEATS_PER_CHORD = 4.0
+
+
+def _centred(values) -> tuple[list[float], float]:
+    mean = sum(values) / 12
+    centred = [v - mean for v in values]
+    return centred, sum(c * c for c in centred)
+
+
+def _correlations(hist: list[float], profile: dict) -> list[tuple[float, int, str]] | None:
+    """Pearson r of the histogram with the profile rotated to every tonic, for both modes:
+    [(r, tonic pc, mode)], or None when the histogram has no variance (no tonal centre)."""
+    d, d_ss = _centred(hist)
+    if d_ss <= 1e-12 * max(1.0, max(abs(h) for h in hist)) ** 2:
+        return None
+    out = []
+    for mode in _MODES:
+        w, w_ss = _centred(profile[mode])
+        den = math.sqrt(w_ss * d_ss)
+        for t in range(12):
+            # the same summation order for every tonic, so a transposed input gives bit-identical r
+            num = sum(w[i] * d[(i + t) % 12] for i in range(12))
+            out.append((num / den, t, mode))
+    return out
+
+
+def _ranked(corrs):
+    # ties (to 12 places) fall back to the tonic's pitch class, then major before minor
+    return sorted(corrs, key=lambda c: (-round(c[0], 12), c[1], _MODES.index(c[2])))
+
+
+def _certainty(ranking) -> float:
+    """music21 key._tonalCertaintyCorrelationCoefficient: r1 + 2·(r1 − r2), r2 the best positive runner-up."""
+    r1 = ranking[0][0]
+    positive = [c[0] for c in ranking[1:] if c[0] > 0]
+    if not positive:
+        return r1 if r1 > 0 else 0.0
+    return r1 + 2 * (r1 - positive[0])
+
+
+def _spell_tonic(pc: int, mode: str, written: dict[int, Note]) -> Note:
+    """The caller's own spelling of that pitch class if they wrote it (made practical: at most 7
+    accidentals), else the spelling with the smaller key signature (F# major and Eb minor on a tie)."""
+    offset = -3 if mode == "minor" else 0
+    if pc in written:
+        return _practical(written[pc], offset)
+    cands = [Note(letter, acc) for letter in LETTERS for acc in (0, -1, 1)
+             if (LETTER_PCS[letter] + acc) % 12 == pc]
+
+    def key(n):
+        f = _fifths(n) + offset
+        return abs(f), (-f if mode == "major" else f)
+
+    return min(cands, key=key)
+
+
+def _note_slots(notes) -> list[list[Note]]:
+    """Notes input -> time slots; a list item that is itself a list is one slot of simultaneous notes."""
+    if isinstance(notes, str):
+        return [[n] for n in parse_notes(notes)]
+    if not isinstance(notes, (list, tuple)) or not notes:
+        raise ValueError("notes must be a non-empty list of note names (an inner list = simultaneous notes) "
+                         "or a string like 'C4 E4 G4'")
+    slots = []
+    for item in notes:
+        if isinstance(item, (list, tuple)):
+            if not item:
+                raise ValueError("an inner list of simultaneous notes must not be empty")
+            slots.append(parse_notes(list(item)))
+        elif isinstance(item, str):
+            slots.extend([n] for n in parse_notes([item]))
+        else:
+            raise ValueError(f"Not a note name: {item!r} (expected a string like 'C4' or a list of them)")
+    return slots
+
+
+def _key_events(notes, chords, tracks, durations, rhythm, step_beats, beats_per_chord):
+    """All pitched input as [(start beat, duration beats, Note)] on one timeline from beat 0."""
+    events: list[tuple[float, float, Note]] = []
+    if notes is not None:
+        slots = _note_slots(notes)
+        if rhythm is not None:
+            pattern = parse_rhythm(rhythm)
+            onsets = [i for i, s in enumerate(pattern) if s != RHYTHM_REST]
+            if not onsets:
+                raise ValueError("the rhythm has no onsets ('O' or 'o')")
+            for n_on, step in enumerate(onsets):
+                nxt = onsets[n_on + 1] if n_on + 1 < len(onsets) else len(pattern)
+                dur = step_beats * (nxt - step)  # the note sustains through the following rests
+                events.extend((step * step_beats, dur, n) for n in slots[n_on % len(slots)])
+        else:
+            if durations is not None:
+                if not isinstance(durations, (list, tuple)):
+                    raise ValueError("durations must be a list of positive numbers, one per note (or chord of notes)")
+                if len(durations) != len(slots):
+                    raise ValueError(f"durations has {len(durations)} values but there are {len(slots)} notes")
+                lengths = [_check_range("each duration", d, 1e-6, 10000) for d in durations]
+            else:
+                lengths = [step_beats] * len(slots)
+            start = 0.0
+            for slot, dur in zip(slots, lengths):
+                events.extend((start, dur, n) for n in slot)
+                start += dur
+    elif durations is not None or rhythm is not None:
+        raise ValueError("durations and rhythm time the `notes`; give notes too")
+    if chords is not None:
+        for i, ch in enumerate(_parse_chord_list(chords)):
+            seen = set()
+            for t in ch["tones"]:
+                if t.pitch_class not in seen:  # each distinct chord tone once
+                    seen.add(t.pitch_class)
+                    events.append((i * beats_per_chord, beats_per_chord, t))
+            if ch["bass"] is not None:  # a slash bass sounds as its own note below the chord
+                events.append((i * beats_per_chord, beats_per_chord, ch["bass"]))
+    if tracks is not None:
+        if not isinstance(tracks, (list, tuple)) or not tracks:
+            raise ValueError("tracks must be a non-empty list of track objects (render_hint or arrange tracks)")
+        for i, track in enumerate(tracks):
+            built = build_track_events(track, i, _TRACK_STEP_BEATS, _TRACK_BEATS_PER_CHORD)
+            if built["is_drums"]:
+                continue
+            for e in built["events"]:
+                events.append((e["start"], e["duration"], parse_note(e["label"])))
+    return events
+
+
+def _histogram(events, lo: float | None = None, hi: float | None = None) -> list[float]:
+    hist = [0.0] * 12
+    for start, dur, note in events:
+        if lo is None:
+            weight = dur
+        else:
+            weight = min(start + dur, hi) - max(start, lo)
+            if weight <= 0:
+                continue
+        hist[note.pitch_class] += weight
+    return hist
+
+
+def detect_key(notes=None, chords=None, tracks=None, durations=None, rhythm: str | None = None,
+               step_beats: float = 1.0, beats_per_chord: float = 4.0, profile: str = "krumhansl",
+               window_beats: float = 0.0, hop_beats: float = 0.0) -> dict:
+    """Estimate the major or minor key of notes, chords or tracks (Krumhansl–Schmuckler key finding).
+
+    The algorithm of Krumhansl & Kessler (1982) and Krumhansl (1990), as music21
+    implements it: a pitch-class histogram, each note weighted by its duration,
+    is correlated (Pearson r) with a key profile rotated to all 24 major and
+    minor keys; the best r wins. Profile vectors are music21's
+    (analysis/discrete.py, BSD-3): 'krumhansl' (Krumhansl–Kessler, the
+    default), 'temperley' (Temperley–Kostka–Payne), 'bellman' (Bellman–Budge),
+    'aarden' (Aarden–Essen — music21 warns that its minor weights are of
+    uncertain origin and recommends them for major only; it reads a plain
+    C-major scale as A minor) and 'simple' (Sapp).
+
+    Input: `notes` and/or `chords` (summed on one timeline from beat 0), OR
+    `tracks` alone. `notes`: note names (an inner list = simultaneous notes);
+    each lasts its entry in `durations`, or follows `rhythm` exactly as a notes
+    track does (onsets take the notes cyclically; a note sustains through the
+    rests after it, each step `step_beats` long), or lasts `step_beats`.
+    `chords`: symbols or note arrays; each distinct chord tone, and a slash
+    bass, sounds `beats_per_chord`. `tracks`: render_hint / arrange tracks,
+    timed exactly as arrange_to_midi renders them (defaults step 0.5, 4 beats
+    per chord); drum tracks are ignored.
+
+    Returns root and scale_type ('major' / 'natural minor', ready for
+    diatonic_chords, analyze_progression, snap_to_scale, check_voice_leading),
+    mode, correlation, certainty (music21's tonalCertainty: r1 + 2·(r1 − r2),
+    r2 the best positive runner-up), the full 24-key ranking, and the
+    histogram. The tonic keeps your spelling when you wrote that pitch class
+    (Gb stays Gb), else the key with the smaller signature. With
+    `window_beats` > 0 it also returns `regions`: whole windows [s, s+window)
+    every `hop_beats` (default window/2; the last aligned to the end, as in
+    music21's WindowedAnalysis), each note weighted by its overlap; a silent
+    window takes its neighbour's key; runs of equal keys merge into regions
+    {start_beat, end_beat, root, scale_type, mean_correlation}, a change placed
+    midway through the overlap of the two windows that disagree; no smoothing
+    across windows. A histogram with no variance (e.g. all twelve notes
+    equally) has no tonal centre and raises.
+    Example: detect_key(notes='C4 D4 E4 F4 G4 A4 B4 C5') -> C major, r 0.9014,
+    certainty 1.1914, runner-up A natural minor 0.7563. Deterministic.
+    """
+    if not isinstance(profile, str) or profile.strip().lower() not in PROFILES:
+        raise ValueError(f"profile must be one of {', '.join(PROFILES)}, got {profile!r}")
+    prof_name = profile.strip().lower()
+    prof = PROFILES[prof_name]
+    _check_range("step_beats", step_beats, 0.0625, 16)
+    _check_range("beats_per_chord", beats_per_chord, 0.25, 64)
+    _check_range("window_beats", window_beats, 0, 100000)
+    _check_range("hop_beats", hop_beats, 0, 100000)
+    if hop_beats and not window_beats:
+        raise ValueError("hop_beats needs window_beats > 0")
+    if tracks is not None and (notes is not None or chords is not None):
+        raise ValueError("give tracks alone, or notes and/or chords — not both")
+    if notes is None and chords is None and tracks is None:
+        raise ValueError("give notes, chords or tracks to analyse")
+    if durations is not None and rhythm is not None:
+        raise ValueError("give durations or rhythm, not both")
+
+    events = _key_events(notes, chords, tracks, durations, rhythm, step_beats, beats_per_chord)
+    written = spelling_for_pcs([n for _s, _d, n in events])
+    hist = _histogram(events)
+    corrs = _correlations(hist, prof)
+    if corrs is None:
+        raise ValueError("no tonal centre: the pitch-class histogram is flat (every pitch class equally weighted, "
+                         "or no pitched notes)")
+    ranking = _ranked(corrs)
+    best_r, best_pc, best_mode = ranking[0]
+    tonic = _spell_tonic(best_pc, best_mode, written)
+    result = {
+        "root": tonic.name,
+        "scale_type": _SCALE_OF_MODE[best_mode],
+        "mode": best_mode,
+        "correlation": round(best_r, 4),
+        "certainty": round(_certainty(ranking), 4),
+        "profile": prof_name,
+        "ranking": [{"root": _spell_tonic(pc, mode, written).name, "scale_type": _SCALE_OF_MODE[mode],
+                     "correlation": round(r, 4)} for r, pc, mode in ranking],
+        "histogram": {written[pc].name: round(w, 6) for pc, w in enumerate(hist) if w > 0},
+    }
+    if window_beats:
+        result["regions"] = _regions(events, prof, written, window_beats, hop_beats or window_beats / 2,
+                                     (best_pc, best_mode, best_r))
+    return result
+
+
+def _regions(events, prof, written, window: float, hop: float, overall: tuple) -> list[dict]:
+    end = max(s + d for s, d, _n in events)
+    # whole windows only, as in music21's WindowedAnalysis (a window never hangs past the end, so
+    # the last one is not read from a fragment); the final window is aligned to the end
+    count = max(1, math.floor((end - window) / hop + 1e-9) + 1) if end > window else 1
+    if count > _MAX_WINDOWS:
+        raise ValueError(f"{count} windows is too many (at most {_MAX_WINDOWS}): use a larger hop_beats")
+    starts = [i * hop for i in range(count)]
+    if end > window and starts[-1] + window < end - 1e-9:
+        starts.append(end - window)
+    keys: list[tuple[int, str] | None] = []
+    rs: list[float | None] = []
+    for s in starts:
+        corrs = _correlations(_histogram(events, s, s + window), prof)
+        if corrs is None:  # silent (or tonally flat): decided by its neighbours below
+            keys.append(None)
+            rs.append(None)
+            continue
+        r, pc, mode = _ranked(corrs)[0]
+        keys.append((pc, mode))
+        rs.append(r)
+    for i in range(1, len(keys)):   # a silent window copies the previous key ...
+        if keys[i] is None:
+            keys[i] = keys[i - 1]
+    for i in range(len(keys) - 2, -1, -1):   # ... and leading silent windows copy the next
+        if keys[i] is None:
+            keys[i] = keys[i + 1]
+    if all(k is None for k in keys):  # no window has a tonal centre of its own: the whole piece's key
+        keys, rs = [overall[:2]] * len(keys), [overall[2]] + [None] * (len(keys) - 1)
+    regions = []
+    for i, k in enumerate(keys):
+        if regions and regions[-1]["key"] == k:
+            regions[-1]["rs"].append(rs[i])
+            continue
+        regions.append({"key": k, "first": i, "rs": [rs[i]]})
+    # a key change between window a and the next window b is placed midway through their overlap
+    # (or the gap between them): with hop = window, exactly at the window boundary
+    bounds = [0.0]
+    for reg in regions[1:]:
+        b = reg["first"]
+        bounds.append(min(end, max(0.0, (starts[b - 1] + window + starts[b]) / 2)))
+    bounds.append(end)
+    out = []
+    for n, reg in enumerate(regions):
+        pc, mode = reg["key"]
+        vals = [r for r in reg["rs"] if r is not None]
+        out.append({
+            "start_beat": round(float(bounds[n]), 6),
+            "end_beat": round(float(bounds[n + 1]), 6),
+            "root": _spell_tonic(pc, mode, written).name,
+            "scale_type": _SCALE_OF_MODE[mode],
+            "mean_correlation": round(sum(vals) / len(vals), 4),
+        })
+    return out
+
+
+# ======================================================= check_voice_leading
+
+_CONSONANT = {("perfect", 1), ("minor", 3), ("major", 3), ("perfect", 5), ("minor", 6), ("major", 6)}
+
+
+def _simple_number(number: int) -> int:
+    return (number - 1) % 7 + 1
+
+
+def _vertical(upper: Note, lower: Note) -> dict:
+    """The spelled interval between two sounding notes (interval_between from the lower-listed voice)."""
+    return interval_between(lower.name, upper.name)
+
+
+def _perfect(iv: dict) -> str | None:
+    """'fifth' / 'octave' when a spelled interval is a perfect fifth / unison-octave (compound or not)."""
+    if iv["quality"] != "perfect":
+        return None
+    simple = _simple_number(iv["number"])
+    return "fifth" if simple == 5 else "octave" if simple == 1 else None
+
+
+def _directed_generic(iv: dict) -> int:
+    return -iv["number"] if iv.get("direction") == "descending" else iv["number"]
+
+
+def _parts_from_lists(voices) -> list[list[Note]]:
+    parts = []
+    for k, v in enumerate(voices):
+        notes = parse_notes(v)
+        for n in notes:
+            if n.octave is None:
+                raise ValueError(f"voice {k}: {n.name} has no octave — write concrete pitches such as 'C4'")
+        parts.append(notes)
+    if len({len(p) for p in parts}) != 1:
+        raise ValueError("note-list voices must all have the same number of notes (one per slot); "
+                         f"got lengths {[len(p) for p in parts]}")
+    return parts
+
+
+def _slices_from_tracks(voices):
+    """Notes tracks -> (names, original indices, slices, attacks, beats), aligned on every attack."""
+    timed = []
+    for i, track in enumerate(voices):
+        ttype = track.get("type", "notes")
+        if ttype != "notes":
+            raise ValueError(f"voice {i} is a {ttype!r} track: check_voice_leading reads notes tracks, one part each "
+                             "(pass a chord progression's voicings through `voicings`)")
+        built = build_track_events(dict(track, type="notes"), i, _TRACK_STEP_BEATS, _TRACK_BEATS_PER_CHORD)
+        evs = []
+        for e in built["events"]:
+            on = round(e["start"] * TICKS_PER_BEAT)
+            off = max(on + 1, round((e["start"] + e["duration"]) * TICKS_PER_BEAT))
+            evs.append((on, off, parse_note(e["label"])))
+        if not evs:
+            raise ValueError(f"voice {i} has no notes")
+        timed.append((built["name"], i, evs))
+    # voices ordered by mean MIDI pitch, highest first (ties keep the given order)
+    timed.sort(key=lambda t: (-sum(n.midi for _a, _b, n in t[2]) / len(t[2]), t[1]))
+    ticks = sorted({on for _name, _i, evs in timed for on, _off, _n in evs})
+    slices, attacks = [], []
+    cursor = [0] * len(timed)   # a notes track's events are in time order and never overlap
+    for tick in ticks:
+        row, hit = [], []
+        for v, (_name, _i, evs) in enumerate(timed):
+            while cursor[v] < len(evs) and evs[cursor[v]][1] <= tick:
+                cursor[v] += 1
+            ev = evs[cursor[v]] if cursor[v] < len(evs) and evs[cursor[v]][0] <= tick else None
+            row.append(ev[2] if ev else None)
+            hit.append(ev is not None and ev[0] == tick)
+        slices.append(row)
+        attacks.append(hit)
+    beats = [round(t / TICKS_PER_BEAT, 6) for t in ticks]
+    return [t[0] for t in timed], [t[1] for t in timed], slices, attacks, beats
+
+
+def _slice_chord(notes: list[Note]):
+    """(root, ChordType) of a sonority read lowest note first, or None if it is no chord.
+
+    Read by harmony._root_and_quality; failing that, as a chord with its fifth omitted
+    (G B F = G7, C E = C), the omission four-part writing allows. None when neither reads.
+    """
+    if len(notes) < 2:
+        return None
+    asc = sorted(notes, key=lambda n: n.midi)
+    names = [n.without_octave().name for n in asc]
+    root, ctype, _bass = _root_and_quality(names)
+    if ctype is not None:
+        return root.without_octave(), ctype
+    for cand in dict.fromkeys(n.without_octave() for n in asc):
+        fifth = transpose(cand, 7, 4)
+        root, ctype, _bass = _root_and_quality(names + [fifth.name])
+        if ctype is not None and root.pitch_class == cand.pitch_class:
+            return root.without_octave(), ctype
+    return None
+
+
+def check_voice_leading(voices=None, voicings=None, root: str | None = None, scale_type: str = "major") -> dict:
+    """Lint your own parts for voice-leading faults (the report shape of check_melody).
+
+    Give exactly one of:
+    - `voices`: at least 2 parts, either note lists with octaves (one note per
+      slot, equal length, listed highest first) or notes-track objects
+      ({notes, rhythm, step_beats, sustain}: render_hint tracks of
+      bach_chorale_voicing, counterpoint, tintinnabuli_voice, a bass line…).
+      Tracks are timed as arrange_to_midi renders them and aligned on every
+      attack (as music21 does): each voice contributes the note sounding then,
+      a held note is oblique motion, a silent voice drops out of that slice.
+      Track voices are ordered by mean pitch, highest first (`voice_order`).
+    - `voicings`: voiced note arrays of equal size (voice_leading's or
+      voice_chords' `chords`); part k is each chord's k-th highest note.
+
+    Motion per voice pair (music21 VoiceLeadingQuartet): static, oblique,
+    parallel (same direction, same generic interval), similar, contrary.
+    Violations (index = the arriving slice, voices 0 = highest):
+    parallel_fifths/_octaves (a spelled P5 or P1/P8, compound too, in both
+    slices, both voices moving the same way); contrary_fifths/_octaves (the
+    same by contrary motion — the strict textbook rule bach_chorale_voicing
+    enforces); direct_fifths/_octaves (outer voices only: similar motion into a
+    P5/P8 with the upper voice leaping more than 2 semitones — Aldwell &
+    Schachter allow it when the soprano steps); voice_crossing; voice_overlap
+    (adjacent voices, music21); melodic_augmented (A2, A4… — the chromatic
+    A1 is fine; Kostka & Payne); melodic_leap_beyond_octave. With `root` (a
+    seven-note key): leading_tone (in the highest or lowest voice the leading
+    tone — tonic minus a semitone, the raised 7th in minor — of a chord on ^5
+    or ^7 rises to the tonic when the next chord's root is ^1 or ^6; in an inner
+    voice a 'frustrated leading tone' is only a warning; bach_chorale_voicing's
+    own soprano rule is stricter), seventh_resolution (a chord seventh falls
+    1–2 semitones when the harmony changes; held is a warning; chords are read
+    by harmony._root_and_quality, or with an omitted fifth), doubled_leading_tone
+    (in a chord on ^5 or ^7). Warnings: unequal_fifths (d5 -> P5 in similar
+    motion with the lowest voice; P5 -> d5 is fine), spacing (adjacent upper
+    voices > 12 semitones, the lowest pair > 19), range (four voices: SATB
+    ranges), melodic_seventh, leap_not_recovered (a leap of 8+ semitones not
+    followed by a 1–2 semitone step back), enharmonic_fifth. Info:
+    `dissonances` — every interval above the lowest voice that is not P1, m3,
+    M3, P5, m6, M6, P8 or a compound of these (music21 isConsonant; a P4 above
+    the bass is dissonant, and spelling matters). A held crossing, spacing or
+    dissonance is reported once, where it is struck. Only adjacent attacks are
+    compared: Fux's species 2–5 rule against fifths or octaves on successive
+    downbeats is NOT checked. Note lists and voicings need octaves (tracks are
+    placed as they render). Returns {valid, voice_order, slices, violations,
+    warnings, motion, dissonances} (+ key, and track_order for tracks).
+    Example: check_voice_leading(voices=[['C5','D5'],['F4','G4']]) -> a
+    parallel_fifths violation at index 1 between voices [0, 1]. Deterministic.
+    """
+    if (voices is None) == (voicings is None):
+        raise ValueError("give exactly one of voices (parts) or voicings (voiced chords)")
+    scale = resolve_scale_type(scale_type)
+    beats = track_order = None
+    if voices is not None:
+        if not isinstance(voices, (list, tuple)) or len(voices) < 2:
+            raise ValueError("voices must be a list of at least 2 parts (note lists with octaves, or notes tracks)")
+        if all(isinstance(v, dict) for v in voices):
+            names, track_order, slices, attacks, beats = _slices_from_tracks(voices)
+        elif all(isinstance(v, (str, list, tuple)) for v in voices):
+            parts = _parts_from_lists(voices)
+            names = [f"voice {k}" for k in range(len(parts))]
+            slices = [list(col) for col in zip(*parts)]
+            attacks = [[True] * len(parts) for _ in slices]
+        else:
+            raise ValueError("voices must be all note lists (with octaves) or all notes-track objects")
+    else:
+        if not isinstance(voicings, (list, tuple)) or not voicings:
+            raise ValueError("voicings must be a non-empty list of voiced chords (note arrays with octaves)")
+        slices = []
+        for k, chord in enumerate(voicings):
+            notes = parse_notes(chord)
+            for n in notes:
+                if n.octave is None:
+                    raise ValueError(f"voicing {k}: {n.name} has no octave — voicings are concrete pitches such as 'C4'")
+            slices.append(sorted(notes, key=lambda n: -n.midi))
+        if len({len(s) for s in slices}) != 1:
+            raise ValueError(f"voicings must all have the same size; got {[len(s) for s in slices]}")
+        if len(slices[0]) < 2:
+            raise ValueError("voicings need at least 2 notes each")
+        names = [f"voice {k}" for k in range(len(slices[0]))]
+        attacks = [[True] * len(slices[0]) for _ in slices]
+
+    tonic = None
+    if root is not None:
+        tonic = parse_notes(root)[0].without_octave()
+        if len(scale.intervals) != 7:
+            raise ValueError(f"the key rules need a seven-note scale; {scale.name} has {len(scale.intervals)} notes")
+    n_voices = len(names)
+    violations, warnings, dissonances = [], [], []
+    motion = {f"{i}-{j}": {"parallel": 0, "similar": 0, "contrary": 0, "oblique": 0, "static": 0}
+              for i in range(n_voices) for j in range(i + 1, n_voices)}
+
+    def add(target, k, vs, rule, message):
+        target.append({"index": k, "voices": vs, "rule": rule, "message": message})
+
+    def sounding(k):
+        return [v for v in range(n_voices) if slices[k][v] is not None]
+
+    # ---------------------------------------------------------- per slice
+    for k, row in enumerate(slices):
+        live = sounding(k)   # (a held crossing, spacing or dissonance is reported once, when struck)
+        for a, i in enumerate(live):
+            for j in live[a + 1:]:
+                if (attacks[k][i] or attacks[k][j]) and row[i].midi < row[j].midi:
+                    add(violations, k, [i, j], "voice_crossing",
+                        f"{row[i].name} (voice {i}) sounds below {row[j].name} (voice {j}), the voice listed under it")
+        for a, i in enumerate(live):
+            for j in live[a + 1:]:
+                if not (attacks[k][i] or attacks[k][j]):
+                    continue
+                iv = _vertical(row[i], row[j])
+                if abs(row[i].midi - row[j].midi) % 12 == 7 and _simple_number(iv["number"]) != 5:
+                    add(warnings, k, [i, j], "enharmonic_fifth",
+                        f"{row[i].name}/{row[j].name}: seven semitones spelled as a {iv['name']}, not a fifth")
+        for a, i in enumerate(live[:-1]):
+            j = live[a + 1]
+            limit = 19 if j == live[-1] else 12
+            if (attacks[k][i] or attacks[k][j]) and row[i].midi - row[j].midi > limit:
+                add(warnings, k, [i, j], "spacing",
+                    f"{row[i].name}/{row[j].name}: {row[i].midi - row[j].midi} semitones apart "
+                    f"(more than {'a twelfth' if limit == 19 else 'an octave'})")
+        if n_voices == 4:
+            for v in live:
+                lo, hi = RANGES[_VOICES[v]]
+                if attacks[k][v] and not lo <= row[v].midi <= hi:
+                    add(warnings, k, [v], "range", f"{row[v].name} is outside the {_VOICES[v]} range "
+                        f"({note_from_midi(lo).name}–{note_from_midi(hi).name})")
+        if len(live) >= 2:
+            low = live[-1]
+            for v in live[:-1]:
+                if not (attacks[k][v] or attacks[k][low]):
+                    continue
+                iv = _vertical(row[v], row[low])
+                if (iv["quality"], _simple_number(iv["number"])) not in _CONSONANT:
+                    dissonances.append({"index": k, "voices": [v, low], "interval": iv["short"],
+                                        "notes": f"{row[v].name}/{row[low].name}"})
+
+    # ---------------------------------------------------------- between slices
+    for k in range(1, len(slices)):
+        prev, cur = slices[k - 1], slices[k]
+        both = [v for v in range(n_voices) if prev[v] is not None and cur[v] is not None]
+        for a, i in enumerate(both):
+            for j in both[a + 1:]:
+                p_i, p_j, c_i, c_j = prev[i], prev[j], cur[i], cur[j]
+                d_i, d_j = c_i.midi - p_i.midi, c_j.midi - p_j.midi
+                p_iv, c_iv = _vertical(p_i, p_j), _vertical(c_i, c_j)
+                if d_i == 0 and d_j == 0:
+                    kind = "static"
+                elif d_i == 0 or d_j == 0:
+                    kind = "oblique"
+                elif (d_i > 0) == (d_j > 0):
+                    kind = "parallel" if _directed_generic(p_iv) == _directed_generic(c_iv) else "similar"
+                else:
+                    kind = "contrary"
+                motion[f"{i}-{j}"][kind] += 1
+                hit = _consecutive_perfect(p_i.midi, p_j.midi, c_i.midi, c_j.midi)
+                if hit is not None:
+                    how, size = hit
+                    what = "fifth" if size == 7 else "octave"
+                    if _perfect(p_iv) == what and _perfect(c_iv) == what:
+                        label = ("perfect fifths" if what == "fifth" else "unisons"
+                                 if p_iv["number"] == c_iv["number"] == 1 else "perfect octaves")
+                        move = f"{p_i.name}/{p_j.name} -> {c_i.name}/{c_j.name}"
+                        if how == "parallel":
+                            add(violations, k, [i, j], f"parallel_{what}s", f"{move}: parallel {label}")
+                        else:
+                            add(violations, k, [i, j], f"contrary_{what}s", f"{move}: consecutive {label} by contrary motion")
+        if len(both) >= 2:
+            hi, lo = both[0], both[-1]
+            p_h, p_l, c_h, c_l = prev[hi], prev[lo], cur[hi], cur[lo]
+            move = f"{p_h.name}/{p_l.name} -> {c_h.name}/{c_l.name}"
+            if _direct_perfect(p_h.midi, p_l.midi, c_h.midi, c_l.midi):
+                what = _perfect(_vertical(c_h, c_l))
+                if what is not None:
+                    add(violations, k, [hi, lo], f"direct_{what}s",
+                        f"{move}: direct (hidden) {what} in the outer voices, the upper voice leaping")
+            for v in both[:-1]:   # unequal fifths against the lowest voice
+                p_iv, c_iv = _vertical(prev[v], p_l), _vertical(cur[v], c_l)
+                d_v, d_l = cur[v].midi - prev[v].midi, c_l.midi - p_l.midi
+                if (p_iv["quality"] == "diminished" and _simple_number(p_iv["number"]) == 5
+                        and _perfect(c_iv) == "fifth" and d_v * d_l > 0):
+                    add(warnings, k, [v, lo], "unequal_fifths",
+                        f"{prev[v].name}/{p_l.name} -> {cur[v].name}/{c_l.name}: a diminished fifth moving to a "
+                        "perfect fifth against the bass")
+        for a, i in enumerate(both[:-1]):
+            j = both[a + 1]
+            if _overlap(prev[i].midi, prev[j].midi, cur[i].midi, cur[j].midi):
+                add(violations, k, [i, j], "voice_overlap",
+                    f"{prev[i].name}/{prev[j].name} -> {cur[i].name}/{cur[j].name}: "
+                    "a voice moves past the note its neighbour just held")
+        for v in both:   # melodic intervals, between a voice's successive notes
+            a_n, b_n = prev[v], cur[v]
+            if not attacks[k][v] or a_n.midi == b_n.midi:
+                continue
+            iv = interval_between(a_n.name, b_n.name)
+            if iv["quality"] in ("augmented", "doubly augmented") and iv["number"] != 1:
+                add(violations, k, [v], "melodic_augmented", f"{a_n.name} -> {b_n.name}: a melodic {iv['name']}")
+            if abs(b_n.midi - a_n.midi) > 12:
+                add(violations, k, [v], "melodic_leap_beyond_octave",
+                    f"{a_n.name} -> {b_n.name}: a leap of {abs(b_n.midi - a_n.midi)} semitones, beyond an octave")
+            if _simple_number(iv["number"]) == 7:
+                add(warnings, k, [v], "melodic_seventh", f"{a_n.name} -> {b_n.name}: a melodic {iv['name']}")
+
+    # leaps of a minor sixth or more, recovered by a step back (a rest starts a new line)
+    for v in range(n_voices):
+        line: list[tuple[int, int]] = []   # (slice index, midi) of each new pitch in the current phrase
+        for k in range(len(slices)):
+            note = slices[k][v]
+            if note is None:
+                _leap_warnings(line, v, warnings, slices)
+                line = []
+            elif not line or note.midi != line[-1][1]:
+                line.append((k, note.midi))
+        _leap_warnings(line, v, warnings, slices)
+
+    # ---------------------------------------------------------- key rules
+    if tonic is not None:
+        t_pc = tonic.pitch_class
+        leading = (t_pc - 1) % 12
+        deg5, deg6 = (t_pc + scale.intervals[4]) % 12, (t_pc + scale.intervals[5]) % 12
+        chords = [_slice_chord([n for n in row if n is not None]) for row in slices]
+
+        def label(ch):
+            return f"{ch[0].name}{ch[1].symbol}"
+
+        for k, ch in enumerate(chords):
+            if ch is None or ch[0].pitch_class not in (deg5, leading):
+                continue
+            holders = [v for v in sounding(k) if slices[k][v].pitch_class == leading]
+            if len(holders) > 1:
+                add(violations, k, holders, "doubled_leading_tone",
+                    f"the leading tone {slices[k][holders[0]].without_octave().name} is doubled in {label(ch)}")
+        for k in range(1, len(slices)):
+            prev, cur = slices[k - 1], slices[k]
+            before, after = chords[k - 1], chords[k]
+            live = sounding(k - 1)
+            if (before is not None and after is not None and before[0].pitch_class in (deg5, leading)
+                    and after[0].pitch_class in (t_pc, deg6)):
+                for v in live:
+                    if prev[v].pitch_class != leading or cur[v] is None or cur[v].midi - prev[v].midi == 1:
+                        continue
+                    move = f"{prev[v].name} -> {cur[v].name}"
+                    if v in (live[0], live[-1]):
+                        add(violations, k, [v], "leading_tone",
+                            f"{move}: the leading tone of {label(before)} does not rise to the tonic of {label(after)}")
+                    else:
+                        add(warnings, k, [v], "leading_tone",
+                            f"{move}: frustrated leading tone (an inner voice of {label(before)} -> {label(after)})")
+            if before is None:
+                continue
+            _fifth_pc, seventh_pc = _roles(chord_notes(before[1], before[0]))
+            if seventh_pc is None:
+                continue
+            if {n.pitch_class for n in prev if n is not None} == {n.pitch_class for n in cur if n is not None}:
+                continue   # the same harmony goes on: the seventh may resolve later
+            for v in live:
+                if prev[v].pitch_class != seventh_pc or cur[v] is None:
+                    continue
+                fall = prev[v].midi - cur[v].midi
+                move = f"{prev[v].name} -> {cur[v].name}"
+                if fall == 0:
+                    add(warnings, k, [v], "seventh_resolution",
+                        f"{move}: the seventh of {label(before)} is held into the next chord (it should fall by step)")
+                elif not 1 <= fall <= 2:
+                    add(violations, k, [v], "seventh_resolution",
+                        f"{move}: the seventh of {label(before)} does not fall by step")
+
+    order = lambda e: (e["index"], e["voices"])  # noqa: E731
+    violations.sort(key=order)
+    warnings.sort(key=order)
+    result = {
+        "valid": not violations,
+        "voice_order": names,
+        "slices": [({"beat": beats[k]} if beats is not None else {})
+                   | {"notes": [n.name if n is not None else None for n in row]} for k, row in enumerate(slices)],
+        "violations": violations,
+        "warnings": warnings,
+        "motion": motion,
+        "dissonances": dissonances,
+    }
+    if track_order is not None:
+        result["track_order"] = track_order
+    if tonic is not None:
+        result["key"] = f"{tonic.name} {scale.name}"
+    return result
+
+
+def _leap_warnings(line, v, warnings, slices):
+    for (k1, m1), (k2, m2), (_k3, m3) in zip(line, line[1:], line[2:]):
+        leap, back = m2 - m1, m3 - m2
+        if abs(leap) >= 8 and not (1 <= abs(back) <= 2 and (back > 0) != (leap > 0)):
+            warnings.append({"index": k2, "voices": [v], "rule": "leap_not_recovered",
+                             "message": f"{slices[k1][v].name} -> {slices[k2][v].name}: a leap of {abs(leap)} "
+                                        "semitones not followed by a step back"})
