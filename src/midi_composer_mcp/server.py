@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
+from . import accompany as _accompany
 from . import analysis as _analysis
 from . import audio as _audio
 from . import chant as _chant
@@ -27,6 +28,7 @@ from . import modern as _modern
 from . import roman as _roman
 from . import scales as _scales
 from . import structure as _structure
+from . import voicing as _voicing
 
 mcp = FastMCP(
     "midi-composer",
@@ -155,14 +157,57 @@ def interval_between(note_a: str, note_b: str) -> dict:
 
 @mcp.tool()
 def analyze_progression(chords: str | list, root: str, scale_type: str = "major") -> dict:
-    """Analyze a chord progression into Roman numerals in a key (the inverse of degrees_to_chords).
+    """Analyze a chord progression into Roman numerals in a key — figures, applied chords, specials, mixture.
 
-    Given chords (symbols like ['C','Am','F','G'] or note arrays) and a key,
-    labels each with its Roman numeral, scale degree, whether it is diatonic,
-    and its harmonic function (tonic/subdominant/dominant). Chromatic/borrowed
-    chords are flagged. Use it to understand or transform existing changes.
+    The inverse of roman_to_chords and degrees_to_chords. Given chords (symbols
+    like ['C','A7','Dm','G7/B'] or note arrays: with octaves the lowest note is
+    the bass, without them the first) and a key, each chord gets its roman
+    numeral, degree, in_key (every tone in the scale, else non_scale_notes, in
+    the written spelling) and harmonic function, plus: figure ('', '6', '64',
+    '7', '65', '43', '42'; null with bass_degree when the bass is no writable
+    chord member, e.g. Csus4/F); roman_figured, the numeral roman_to_chords
+    reads back ('I6', 'V65', 'V65/ii', 'N6', 'Ger65', 'Cad64'; textbook minor
+    numerals VI/VII; null if that dialect cannot write the root); applied, for
+    out-of-key V/x and vii°/x chords (A7 in C = 'V7/ii', F#dim7 = 'vii°7/V'; in
+    minor V and vii° get function_note 'harmonic-minor dominant' instead);
+    special ('Neapolitan'; 'It6'/'Fr43'/'Ger65'/'Sw43' for a written note array
+    with b6 in the bass; 'Cad64' for a tonic 6/4 before V, function still
+    'tonic'); enharmonic_to (the symbol 'Ab7' sounds like Ger65); borrowed_from
+    for the other out-of-key chords (Fm in C: C harmonic major, C harmonic
+    minor, C natural minor, C phrygian, C locrian). e.g. ['C','A7','Dm','G7/B',
+    'C'] in C -> roman_figured I V7/ii ii V65 I. To move a draft to another key,
+    feed its roman_figured list to roman_to_chords there.
     """
     return _harmony.analyze_progression(chords, root, scale_type)
+
+
+@mcp.tool()
+def next_chords(chords: str | list, root: str, scale_type: str = "major", sevenths: bool = False,
+                include_chromatic: bool = True, sort: str = "rule", octave: int = 4,
+                limit: int = 16) -> dict:
+    """Rank the chords that may follow the last one, by Piston's Table of Usual Root Progressions (1941) — rules, not probabilities.
+
+    The last chord of `chords` picks a row of the table (VI is followed by II
+    or V, sometimes III or IV, less often I; one table for major and minor).
+    Tiers: 0 resolution (an applied chord's target: A7 -> Dm), 1 usual, 2
+    sometimes, 3 less often (diatonic chords on the listed degrees; triads, or
+    sevenths with sevenths=true; natural minor adds the raised V/vii°), 4
+    applied (V7/x of the row's usual and sometimes targets), 5 mixture (major
+    keys only: ii°, bIII, iv, bVI from the parallel minor, plus bVII), 6
+    unlisted (a mixture chord on a degree the row does not list).
+    include_chromatic=false keeps tiers 0-3. Each candidate: symbol, token
+    (roman_to_chords dialect), roman, notes, tier, tier_name, rule (the table
+    row), common_tones, root_motion (Schoenberg: ascending (strong) /
+    descending / superstrong), movement (semitones from the last chord's
+    voice_leading voicing to the candidate's best inversion) and in_key.
+    sort='rule' (by tier) or 'movement' (smoothest first); limit 1-64. The key
+    must have 7 notes. e.g. next_chords(['C','Am'], 'C') -> Dm G (usual), F Em
+    (sometimes), C (less often), A7 D7 B7 C7 (applied), Ddim Fm Eb (mixture),
+    Ab Bb (unlisted). Pick one, append it and call again to grow a progression;
+    symbols feed voice_leading and chords_to_midi.
+    """
+    return _harmony.next_chords(chords, root, scale_type, sevenths, include_chromatic, sort, octave, limit)
+
 
 
 @mcp.tool()
@@ -175,6 +220,33 @@ def voice_leading(chords: str | list, octave: int = 4) -> dict:
     track for natural-sounding pads instead of parallel root-position blocks.
     """
     return _harmony.voice_leading(chords, octave=octave)
+
+
+@mcp.tool()
+def voice_chords(chords: str | list, style: str = "drop2", octave: int = 4,
+                 top_notes: str | list[str] | None = None, connect: bool = True) -> dict:
+    """Voice a progression in an arranging style — drop-2/3/2&4, open, shell or Levine rootless — connected smoothly.
+
+    Styles: 'close' (exactly voice_leading), 'drop2' / 'drop3' / 'drop24' (four
+    voices in close position, then the 2nd / 3rd / 2nd+4th voice from the top
+    dropped an octave; a triad doubles its bottom voice, R-3-5-R; a chord of 5+
+    tones omits the 5th, then the root), 'open' (bass in octave-1, the 5th above
+    it, the other members stacked up), 'shell' (bass + 3rd + 7th: A = R-3-7,
+    B = R-7-3; a 6-chord uses its 6th, a triad its 5th), 'rootless_a' /
+    'rootless_b' / 'rootless' (Mark Levine's left-hand A/B voicings, The Jazz
+    Piano Book: major/minor 3-5-7-9 / 7-9-3-5, dominant 3-13-b7-9 / b7-9-3-13
+    with the chord's own b9/#9 or altered 5th, m7b5 b3-b5-b7-1; bottom note at
+    or above D(octave-1); triads, sus and dim7 raise). connect=true chains
+    greedily with voice_leading's cost and tie-breaks (least movement, common
+    tones held); connect=false takes rotation 0 / variant A. top_notes (one per
+    chord, e.g. a melody: 'E5' exact, 'E' any octave) forces each voicing's
+    highest note. A slash bass stays lowest. Returns voicings [{symbol, notes,
+    midi, variant, degrees}], `chords` for chords_to_midi or
+    check_voice_leading(voicings=...), total_movement and a render_hint chords track.
+    e.g. voice_chords(['Dm7','G7','Cmaj7'], 'rootless') -> F3 A3 C4 E4 | F3 A3 B3 E4 | E3 G3 B3 D4.
+    """
+    return _voicing.voice_chords(chords, style=style, octave=octave, top_notes=top_notes, connect=connect)
+
 
 
 @mcp.tool()
@@ -259,6 +331,46 @@ def degrees_to_chords(root: str, scale_type: str, degrees: str | list[int | str]
     This tool only maps degrees to chords; choosing the degrees is up to you.
     """
     return _diatonic.degrees_to_chords(root, scale_type, degrees, sevenths)
+
+
+@mcp.tool()
+def chord_palette(root: str, scale_type: str = "major", extended: bool = False, sevenths: bool = False,
+                  max_notes: int = 4, include_dyads: bool = False, borrow: bool = False,
+                  source_modes: str | list[str] | None = None, fifths_steps: int = 0,
+                  limit: int = 0) -> dict:
+    """Every chord that fits a key, simplest first (a Klimper-style palette), plus optional borrowed chords.
+
+    Pure set arithmetic, any scale. Default: the scale's stacked triads
+    (sevenths=true: seventh chords) — chord_palette('C') -> C Dm Em F G Am Bdim.
+    extended=true: every chord type (sus2, sus4, 6, add9, 7sus4 ... up to
+    max_notes 3-6; include_dyads adds power chords) rooted on a scale note whose
+    notes all lie in the scale — 42 chords in C major, 17 with max_notes=3.
+    borrow=true adds modal interchange from the parallel modes (lydian,
+    mixolydian, dorian, natural minor, phrygian, locrian, harmonic/melodic minor,
+    harmonic major), or only from `source_modes`; fifths_steps=n (0-6) borrows
+    from the same mode n keys round the circle. A borrowed chord has a note
+    outside the key: chord_palette('C', borrow=True) adds D F#dim Bm (lydian),
+    Edim Gm Bb (mixolydian), Cm Ebaug Adim (melodic minor), Ddim Fm Abaug
+    (harmonic major), Eb (dorian), Ab (harmonic minor), Db Gdim Bbm (phrygian),
+    Cdim Ebm Gb (locrian); fifths_steps=1 in C adds Bm D F#dim (G major) and
+    Gm Bb Edim (F major). Per chord: symbol, notes, chord_type, size, degree,
+    family (major/minor/other), core (the stacked chord), roman against the home
+    tonic (7-note keys: 'bVI', 'iv', '#iv°', 'Isus4'), degree_function, in_key,
+    source ('C dorian'), distance (the source's notes outside the key),
+    non_home_notes, same_notes_as (C6 ~ Am7) and sources (every considered scale
+    that holds it, e.g. Fm: C harmonic major, harmonic minor, natural minor,
+    phrygian, locrian). In-key chords come first by (size, degree), borrowed
+    ones by distance. `symbols` feed voice_leading / chords_to_midi, `tokens`
+    feed roman_to_chords (in a non-major key an entry with `roman_note` reads
+    back only in the parallel major). limit>0 truncates; count is the total.
+    """
+    return _diatonic.chord_palette(root, scale_type=scale_type, extended=extended, sevenths=sevenths,
+                                   max_notes=max_notes, include_dyads=include_dyads, borrow=borrow,
+                                   source_modes=source_modes, fifths_steps=fifths_steps, limit=limit)
+
+# Place it in server.py's "diatonic" section right after degrees_to_chords. No new import is needed
+# (server.py already has `from . import diatonic as _diatonic`). Optionally add chord_palette to the
+# CHORDS list in the FastMCP instructions string.
 
 
 # ----------------------------------------------------------- roman numerals
@@ -726,7 +838,8 @@ def detect_key(notes: str | list | None = None, chords: str | list | None = None
     notes track, or `step_beats` each) and/or `chords` (each chord
     `beats_per_chord`), OR `tracks` alone (render_hint / arrange tracks, timed
     as they render; drums ignored). `profile`: krumhansl (default), temperley,
-    bellman, aarden (major only, per music21), simple. Returns root and
+    bellman, aarden (its minor weights are of uncertain origin, per
+    music21), simple. Returns root and
     scale_type ('major' / 'natural minor' — ready for diatonic_chords,
     analyze_progression, snap_to_scale, check_voice_leading), correlation,
     certainty, the 24-key ranking and the histogram; the tonic keeps your
@@ -762,6 +875,68 @@ def check_voice_leading(voices: list | None = None, voicings: list | None = None
     e.g. check_voice_leading(voices=[['C5','D5'],['F4','G4']]) -> parallel_fifths at index 1, voices [0, 1].
     """
     return _analysis.check_voice_leading(voices=voices, voicings=voicings, root=root, scale_type=scale_type)
+
+
+# ------------------------------------------------------------ accompaniment
+
+@mcp.tool()
+def chord_pattern(chords: str | list, pattern: str = "alberti", beats_per_chord: float | list[float] = 4.0,
+                  step_beats: float = 0.5, mode: str = "chord", phase: str = "restart",
+                  root: str | None = None, scale_type: str = "major", octave: int = 4,
+                  smooth: bool = True, sustain: bool = False) -> dict:
+    """Play a chord-relative figure over a whole progression — Alberti bass, broken chords, arpeggios, scale runs.
+
+    `pattern` is a preset — alberti '^1 3 2 3', up '^1 2 3 4', down '^4 3 2 1',
+    updown '^1 2 3 4 3 2', murky "^1, 1" (broken octaves) — or your own steps:
+    an index (1 = the voicing's bottom note), '^' accents it (O in the rhythm),
+    each ' / , moves it an octave up / down, '.' is a rest (a hold with
+    `sustain`). mode='chord': index k is the k-th voicing tone, wrapping up an
+    octave (4 of a triad = the bottom note an octave up). mode='scale' (needs
+    `root`/`scale_type`): index k is the k-th scale note from the chord root
+    (spelled in the key; a chord whose root is off the scale falls back to chord
+    mode). Voicings come from voice_leading (smooth=true) or root position with
+    note arrays kept as written (smooth=false, so voice_chords voicings drive
+    it). Each chord lasts `beats_per_chord` (one number or one per chord) =
+    a whole number of `step_beats` steps; phase 'restart' restarts the figure on
+    every chord, 'continue' runs it on across the changes.
+    e.g. chord_pattern(['C','Am','F','G'], 'alberti', beats_per_chord=2) ->
+    C4 G4 E4 G4 | C4 A4 E4 A4 | C4 A4 F4 A4 | D4 B4 G4 B4, rhythm 'Oooo' per chord.
+    Returns the notes track, per_chord notes and a render_hint (chords + pattern
+    tracks) for arrange_to_midi or an arrange_song section; pair with bass_line.
+    """
+    return _accompany.chord_pattern(chords, pattern=pattern, beats_per_chord=beats_per_chord,
+                                    step_beats=step_beats, mode=mode, phase=phase, root=root,
+                                    scale_type=scale_type, octave=octave, smooth=smooth, sustain=sustain)
+
+
+@mcp.tool()
+def bass_line(chords: str | list, style: str = "root", beats_per_chord: float | list[float] = 4.0,
+              step_beats: float = 1.0, rhythm: str | None = None, octave: int = 2,
+              pedal: str | None = None, ending: str = "loop") -> dict:
+    """Write a bass part from chords by fixed rules — root, root-fifth, root-octave, chromatic approach, walking, pedal.
+
+    The bass of a chord is its slash bass, else its root (a note array: its
+    lowest note). Every note is folded into E1-G3 (MIDI 28-55); each chord's
+    bass goes to the pitch nearest the previous note. Styles (default rhythm per
+    chord): root (held), root_fifth (bass + the chord's fifth below, country
+    two-beat 'O.o.'), root_octave ('Oo'), approach (the bass, then a chromatic
+    approach into the next chord on the last onset: from below when it lies
+    above, G -> F#, else from above, C -> Db), walking (chord tones 3rd-5th-7th
+    or octave on the beats — turning down once they would pass G3 — and the
+    approach on the last beat; a simplified codification of walking-bass
+    pedagogy), pedal (the `pedal` note, default the first bass, under every
+    chord). `rhythm` (O/o/., one chord span long) replaces the default on every
+    chord. ending='loop' approaches the first chord from the last; 'root' ends
+    without an approach.
+    e.g. bass_line(['C','Am','F','G'], 'walking') -> C2 E2 G2 G#2 | A2 C3 E3 Gb3 |
+    F3 C3 A2 Ab2 | G2 B2 D3 Db3; bass_line(['C','G/B','Am','F']) -> C2 B1 A1 F1.
+    Returns a notes track (program 33, finger bass), per_chord notes and a
+    render_hint for arrange_to_midi / arrange_song, next to chord_pattern.
+    """
+    return _accompany.bass_line(chords, style=style, beats_per_chord=beats_per_chord,
+                                step_beats=step_beats, rhythm=rhythm, octave=octave, pedal=pedal,
+                                ending=ending)
+
 
 
 # ----------------------------------------------------------- song structure
