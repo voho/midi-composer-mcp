@@ -189,20 +189,55 @@ def _voicings(tones: list[Note], bass_pc: int, root_pc: int, avoid_double: set[i
     return out
 
 
+# MIDI-level voice-leading facts for two voices moving from one chord to the next (p_* before,
+# c_* after; *_hi is the upper voice, *_lo the lower, as MIDI numbers). bach_chorale_voicing and
+# analysis.check_voice_leading share them, so the two tools cannot disagree about these facts;
+# the checker adds the spelled-interval test (a real P5, not a d6) on top.
+
+def _consecutive_perfect(p_hi: int, p_lo: int, c_hi: int, c_lo: int) -> tuple[str, int] | None:
+    """Two voices a perfect fifth or octave apart (7 or 0 semitones mod 12, compound or not) in
+    both chords, both moving: ('parallel', 7|0) in similar motion, ('contrary', 7|0) in contrary
+    motion; None otherwise (a held voice is oblique motion, not a fault)."""
+    p_int = abs(p_hi - p_lo) % 12
+    c_int = abs(c_hi - c_lo) % 12
+    if c_int not in (0, 7) or p_int != c_int:
+        return None
+    motion = (c_hi - p_hi) * (c_lo - p_lo)
+    if motion > 0:
+        return "parallel", c_int
+    if motion < 0:
+        return "contrary", c_int
+    return None
+
+
+def _direct_perfect(p_hi: int, p_lo: int, c_hi: int, c_lo: int) -> bool:
+    """A direct (hidden) fifth/octave: similar motion into a perfect fifth or octave (mod 12) from a
+    different interval, with the upper voice leaping (more than 2 semitones). A true parallel is
+    _consecutive_perfect's case, not this one."""
+    outer = abs(c_hi - c_lo) % 12
+    return (outer in (0, 7) and abs(p_hi - p_lo) % 12 != outer
+            and (c_hi - p_hi) * (c_lo - p_lo) > 0 and abs(c_hi - p_hi) > 2)
+
+
+def _overlap(p_hi: int, p_lo: int, c_hi: int, c_lo: int) -> bool:
+    """Voice overlap (music21): the upper voice moves below where the lower just was, or the lower
+    voice moves above where the upper just was."""
+    return c_hi < p_lo or c_lo > p_hi
+
+
 def _pair_parallels(prev, cur) -> list[str]:
     """Consecutive perfect fifths/octaves between two voices, in similar or in contrary motion."""
     bad = []
     for i in range(4):
         for j in range(i + 1, 4):
-            p_int = (prev[i] - prev[j]) % 12
-            c_int = (cur[i] - cur[j]) % 12
-            if c_int not in (0, 7) or p_int != c_int:
+            hit = _consecutive_perfect(prev[i], prev[j], cur[i], cur[j])
+            if hit is None:
                 continue
-            what = "octaves" if c_int == 0 else "fifths"
-            motion = (cur[i] - prev[i]) * (cur[j] - prev[j])
-            if motion > 0:
+            kind, size = hit
+            what = "octaves" if size == 0 else "fifths"
+            if kind == "parallel":
                 bad.append(f"parallel {what} {_VOICES[i]}/{_VOICES[j]}")
-            elif motion < 0:
+            else:
                 bad.append(f"consecutive {what} by contrary motion {_VOICES[i]}/{_VOICES[j]}")
     return bad
 
@@ -211,13 +246,11 @@ def _transition_faults(prev, cur, leading_pc, tonic_pc, prev_seventh_pc) -> tupl
     """Hard faults (rule breaks) and a style cost for moving from one SATB chord to the next."""
     faults = _pair_parallels(prev, cur)
     # direct (hidden) fifths/octaves in the outer voices with a leap in the soprano
-    outer = (cur[0] - cur[3]) % 12
-    if (outer in (0, 7) and (prev[0] - prev[3]) % 12 != outer  # (a true parallel is reported above)
-            and (cur[0] - prev[0]) * (cur[3] - prev[3]) > 0 and abs(cur[0] - prev[0]) > 2):
+    if _direct_perfect(prev[0], prev[3], cur[0], cur[3]):
         faults.append("direct fifth/octave in the outer voices with a soprano leap")
     # voice overlap: a voice moves past where its neighbour just was
     for i in range(3):
-        if cur[i] < prev[i + 1] or cur[i + 1] > prev[i]:
+        if _overlap(prev[i], prev[i + 1], cur[i], cur[i + 1]):
             faults.append(f"overlap {_VOICES[i]}/{_VOICES[i + 1]}")
     # the leading tone in an outer voice rises to the tonic when the next chord holds the tonic
     for i in (0,):
