@@ -17,7 +17,10 @@ from .midi_io import (
     _build_file,
     _channel_allocator,
     _check_range,
+    _check_swing,
     _common_meta,
+    _swing_events,
+    _swing_warp,
     _write_file,
     build_track_events,
     DRUM_CHANNEL,
@@ -90,8 +93,8 @@ def plan_sections(form, bars=8, beats_per_bar: int = 4, tempo: int | None = None
 
 
 def render_song_structure(sections, form=None, tempo: int = 120, beats_per_bar: int = 4,
-                          step_beats: float = 0.5, file_name: str | None = None,
-                          output_dir: str | None = None) -> dict:
+                          step_beats: float = 0.5, swing: float = 0.5, swing_unit: float = 0.5,
+                          file_name: str | None = None, output_dir: str | None = None) -> dict:
     """Assemble named sections into one multi-track song MIDI file.
 
     `sections` maps a section name to a section spec
@@ -107,7 +110,8 @@ def render_song_structure(sections, form=None, tempo: int = 120, beats_per_bar: 
     tracks are named by type ('notes', or 'notes_1', 'notes_2' when a section has
     several), so separate parts never merge. A name cannot be drums in one section
     and pitched in another. An explicit `channel` is honoured (drums always use
-    channel 10). The file's time signature follows `beats_per_bar`.
+    channel 10). The file's time signature follows `beats_per_bar`. `swing` /
+    `swing_unit` (or a track's own) swing every section on the song's global grid.
     """
     if not isinstance(sections, dict) or not sections:
         raise ValueError("sections must be a non-empty mapping of section name to {bars, tracks}")
@@ -115,6 +119,7 @@ def render_song_structure(sections, form=None, tempo: int = 120, beats_per_bar: 
         raise ValueError(f"beats_per_bar must be an integer between 1 and 32, got {beats_per_bar!r}")
     _check_range("tempo", tempo, 10, 400, integer=True)
     _check_range("step_beats", step_beats, 0.0625, 16)
+    swing, swing_unit = _check_swing(swing, swing_unit)
 
     order = _resolve_form(form, known=sections) if form is not None else list(sections)
     for label in order:
@@ -164,7 +169,9 @@ def render_song_structure(sections, form=None, tempo: int = 120, beats_per_bar: 
             raise ValueError(f"section {label!r} has no tracks")
         built = []
         for i, (t, default) in enumerate(zip(tracks, default_names(tracks))):
-            b = build_track_events(t, i, step_beats, bpb)
+            # swing is applied below, once the section sits at its place in the song
+            b = build_track_events(t, i, step_beats, bpb, swing=swing, swing_unit=swing_unit,
+                                   apply_swing=False)
             if default:
                 b["name"] = default
             b["channel"] = t.get("channel")
@@ -193,6 +200,7 @@ def render_song_structure(sections, form=None, tempo: int = 120, beats_per_bar: 
     timeline = []
     offset = 0.0
     bar_cursor = 0
+    swung = False
     for occ, label in enumerate(order):
         sec = built_sections[label]
         for b in sec["built"]:
@@ -207,9 +215,13 @@ def render_song_structure(sections, form=None, tempo: int = 120, beats_per_bar: 
                     f" give them different names"
                 )
             elif not b["is_drums"] and b["program"] != name_program[tname]:
-                name_events[tname].append({"start": b["start"] + offset, "program": b["program"]})
+                change = _swing_warp(b["start"] + offset, *b["swing"])
+                name_events[tname].append({"start": change, "program": b["program"]})
                 name_program[tname] = b["program"]
             shifted = [dict(e, start=e["start"] + offset) for e in b["events"]]
+            if b["swing"][0] != 0.5:
+                shifted = _swing_events(shifted, *b["swing"])  # on the song's absolute timeline
+                swung = True
             name_events.setdefault(tname, []).extend(shifted)
         timeline.append({
             "index": occ,
@@ -251,9 +263,15 @@ def render_song_structure(sections, form=None, tempo: int = 120, beats_per_bar: 
             summary["program_changes"] = changes
         track_summary.append(summary)
 
-    mid = _build_file(parts, tempo, bpb, total_beats=offset)
+    total_beats = offset
+    if swung:
+        # swing never moves a bar line of an even meter; swung quarters in an odd meter can
+        # push the last note past the final bar line, and the file must still last as reported
+        total_beats = max([offset] + [e["start"] + e["duration"] for evs in name_events.values()
+                                      for e in evs if "program" not in e])
+    mid = _build_file(parts, tempo, bpb, total_beats=total_beats)
     result = _write_file(mid, file_name, output_dir, "song")
-    result.update(_common_meta(tempo, offset))
+    result.update(_common_meta(tempo, total_beats))
     result["form"] = order
     result["beats_per_bar"] = bpb
     result["total_bars"] = bar_cursor
