@@ -90,6 +90,8 @@ def _slot_plan(n_bars: int, species: int, bar_beats: float) -> list[dict]:
         else:  # species 5 (florid): alternate halves and quarters, suspension before the cadence
             if i == n_bars - 2 and i > 0:
                 ks = [(bar_beats / 2, True, True), (bar_beats / 2, False, False)]
+            elif i == n_bars - 3:  # the suspension is prepared by a half note, never a tied quarter
+                ks = [(bar_beats / 2, True, False), (bar_beats / 2, False, False)]
             elif i % 2 == 0:
                 ks = [(bar_beats / 4, s == 0, False) for s in range(4)]
             else:

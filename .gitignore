@@ -15,3 +15,5 @@ demos/02_anthem.wav
 demos/04_counterpoint_species.wav
 .idea/
 .vscode/
+
+.DS_Store

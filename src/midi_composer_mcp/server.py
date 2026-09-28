@@ -12,14 +12,17 @@ from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 
 from . import audio as _audio
+from . import chant as _chant
 from . import chords as _chords
 from . import circle as _circle
 from . import counterpoint as _counterpoint
 from . import diatonic as _diatonic
 from . import generate as _generate
 from . import harmony as _harmony
+from . import masters as _masters
 from . import melody as _melody
 from . import midi_io as _midi
+from . import modern as _modern
 from . import scales as _scales
 from . import structure as _structure
 
@@ -31,7 +34,11 @@ mcp = FastMCP(
         " SCALES (get_scale, match_scales), CHORDS (get_chord, diatonic_chords,"
         " degrees_to_chords, match_chords), MELODY (notes_from_degrees,"
         " arpeggiate, melodic_walk, motif_grammar, random_notes, transpose_notes),"
-        " RHYTHM (random_rhythm, euclidean_rhythm), STRUCTURE (plan_sections,"
+        " RHYTHM (random_rhythm, euclidean_rhythm), HISTORICAL MELODY (church_mode,"
+        " solmization, guido_vowel_melody, check_melody, cantus_firmus), NAMED HARMONY"
+        " RULES (rameau_fundamental_bass, schoenberg_progressions, bach_chorale_voicing,"
+        " neo_riemannian, bartok_axis, coltrane_changes), MODERN (twelve_tone_matrix,"
+        " pitch_class_set, additive_process, phase_shift), STRUCTURE (plan_sections,"
         " arrange_song), and rendering (notes/chords/drums/arrange_to_midi,"
         " midi_to_audio). Notes are strings like 'C', 'F#', 'Bb' — add an octave"
         " for concrete pitches ('C5', 'Eb3'; C4 is middle C); octave-less notes"
@@ -450,6 +457,205 @@ def counterpoint(cantus: str | list[str], root: str, scale_type: str = "major",
     """
     return _counterpoint.species_counterpoint(cantus, root, scale_type,
                                               species=species, position=position)
+
+
+# ------------------------------------------------ historical melody rules
+
+@mcp.tool()
+def church_mode(mode: int | str) -> dict:
+    """One of the eight Gregorian church modes: final, reciting tone (tenor) and range (ambitus).
+
+    `mode` is 1-8, I-VIII or a name: Dorian, Hypodorian, Phrygian, Hypophrygian,
+    Lydian, Hypolydian, Mixolydian, Hypomixolydian. Authentic modes span the
+    octave above the final; plagal ('hypo-') modes sit a fourth lower with the
+    same final. Chant melodies circle the tenor and end on the final. Returns the
+    ambitus as notes (feed them to melodic_walk or guido_vowel_melody).
+    """
+    return _chant.church_mode(mode)
+
+
+@mcp.tool()
+def solmization(notes: str | list[str]) -> dict:
+    """Sing a melody in Guido of Arezzo's hexachord syllables (ut re mi fa sol la) with mutations.
+
+    Hexachords naturale (on C), durum (on G, B = mi) and molle (on F, B♭ = fa);
+    mi–fa is always the semitone. The melody stays in one hexachord while it can
+    and mutates on a shared pivot note by the rule 'per re sursum, per la
+    deorsum' — rising, the pivot becomes re; falling, la (C D E F G A B♭ c = ut
+    re mi fa re mi fa sol). Notes outside the gamut are musica ficta, sung in a
+    transposed hexachord (raised = mi, lowered = fa: D E F♯ G = ut re mi fa).
+    """
+    return _chant.solmization(notes)
+
+
+@mcp.tool()
+def guido_vowel_melody(text: str, mode: int | str = 1, rows: int = 1) -> dict:
+    """Guido of Arezzo's vowel method (Micrologus, c. 1026): turn a text into a chant melody.
+
+    Guido wrote the vowels a e i o u under the notes of the scale from gamma
+    upward, repeating (the table sits in the modes' octave, so the Dorian final
+    D carries u, as in Guido); `rows=2` adds his second row, starting on B.
+    Each syllable (Latin syllabification: que-ant, De-us) is sung on the pitch
+    carrying its vowel nearest the previous note within the church mode's
+    range, and the melody closes on the mode's final. E.g.
+    guido_vowel_melody('Ut queant laxis resonare fibris', 'Dorian').
+    """
+    return _chant.guido_vowel_melody(text, mode, rows)
+
+
+@mcp.tool()
+def check_melody(notes: str | list[str], root: str, scale_type: str = "major", strict: bool = True) -> dict:
+    """Check a melody against the cantus-firmus rules of species-counterpoint teaching (after Fux, Jeppesen).
+
+    Errors: start/end on the tonic, final by step, diatonic (a raised 7th may be
+    the penultimate note in aeolian/dorian/mixolydian), no repeated notes, only
+    2nds/3rds/4ths/5ths/ascending minor 6th/octave (no tritones, 7ths, major
+    6ths), leaps over a third recovered by a step back, at most two leaps in a
+    row (same-direction leaps outlining a consonance), a single climax, range
+    within a tenth, leading tone to tonic. Warnings: length, too few steps,
+    tritones outlined between turning points, long scale runs, repeated
+    figures, an unraised whole-step 7–1 cadence. `strict=False` turns the leap
+    rules into warnings (Fux's own F- and G-mode cantus firmi break them).
+    Write octaves for leaps of a 5th or more; octave-less notes are read nearest
+    the previous note.
+    """
+    return _chant.check_melody(notes, root, scale_type, strict)
+
+
+@mcp.tool()
+def cantus_firmus(root: str, scale_type: str = "major", length: int = 10, variant: int = 0) -> dict:
+    """Compose a cantus firmus (6-16 notes) that obeys every check_melody rule — deterministic.
+
+    `variant` 0-999: each variant is a different reproducible melody (an error
+    says when fewer exist). Feed the notes to counterpoint() for species
+    counterpoint, or harmonize them.
+    """
+    return _chant.cantus_firmus(root, scale_type=scale_type, length=length, variant=variant)
+
+
+# ----------------------------------------------- harmony rules of the masters
+
+@mcp.tool()
+def rameau_fundamental_bass(chords: str | list, root: str | None = None, scale_type: str = "major") -> dict:
+    """Rameau's fundamental bass (1722): the chord roots under a progression and his cadences.
+
+    Returns the root line (render it as a bass track), each root motion (by
+    fifth, third or step — Rameau preferred fifths) and, with a key, the
+    cadences: cadence parfaite (V7→I), cadence irrégulière (bass rises a fifth:
+    IV→I, I→V), cadence rompue (V→vi).
+    """
+    return _masters.rameau_fundamental_bass(chords, root=root, scale_type=scale_type)
+
+
+@mcp.tool()
+def schoenberg_progressions(chords: str | list) -> dict:
+    """Classify root progressions as Schoenberg did: ascending (strong), descending, superstrong.
+
+    Ascending: root up a fourth or down a third. Descending: root up a fifth or
+    up a third. Superstrong: root by step. Root motion is read from the sounding
+    interval, so spelling does not matter. Schoenberg built harmony mostly on
+    ascending progressions — use the summary to judge a progression's drive.
+    """
+    return _masters.schoenberg_progressions(chords)
+
+
+@mcp.tool()
+def bach_chorale_voicing(chords: str | list, root: str | None = None, scale_type: str = "major",
+                         melody: str | list[str] | None = None) -> dict:
+    """Voice a progression in four parts (SATB) by the rules of Bach-chorale writing.
+
+    Voice ranges and spacing, complete chords (a 7th chord may drop its fifth),
+    the bass on the root or slash bass, no doubled leading tone or seventh, no
+    parallel or outer-voice direct fifths/octaves, no overlap, leading tone up,
+    sevenths down — then the smoothest voicing (exact search). Returns the four
+    voices, per-chord SATB notes, any unavoidable rule breaks and a four-track
+    render_hint for arrange_to_midi. Give `melody` (one note per chord, e.g.
+    from harmonize_melody) to keep a chorale tune in the soprano.
+    """
+    return _masters.bach_chorale_voicing(chords, root=root, scale_type=scale_type, melody=melody)
+
+
+@mcp.tool()
+def neo_riemannian(chord: str | list[str], operations: str) -> dict:
+    """Neo-Riemannian P, L, R transformations of a major/minor triad (Riemann, Lewin, Cohn).
+
+    P: C ↔ Cm, R: C ↔ Am, L: C ↔ Em; each keeps two notes and moves one by step.
+    `operations` like 'PLR' or 'LRLR' are applied in order — the smooth,
+    chromatic triad chains of film scores. Returns each chord and the moving note.
+    """
+    return _masters.neo_riemannian(chord, operations)
+
+
+@mcp.tool()
+def bartok_axis(key: str) -> dict:
+    """Bartók's axis system (after Lendvai): the tonic, subdominant and dominant axes of a key.
+
+    Each function is a minor-third cycle of four keys with a pole and a
+    tritone counterpole (C: tonic axis C–F♯ with A–E♭). Keys on one axis can
+    substitute for each other.
+    """
+    return _masters.bartok_axis(key)
+
+
+@mcp.tool()
+def coltrane_changes(key: str) -> dict:
+    """Coltrane changes ('Giant Steps'): replace a ii–V–I with three tonal centres a major third apart.
+
+    In C: Dm7 E♭7 A♭maj7 B7 Emaj7 G7 Cmaj7. Returns original and substituted
+    symbols (ready for voice_leading / chords_to_midi) and the tonal centres.
+    """
+    return _masters.coltrane_changes(key)
+
+
+# ------------------------------------------------------ modern techniques
+
+@mcp.tool()
+def twelve_tone_matrix(row: str | list) -> dict:
+    """Schoenberg's twelve-tone matrix: all 48 forms (P, I, R, RI) of a 12-note row.
+
+    `row`: the 12 pitch classes as notes or numbers 0-11 ('0 11 3 4 ...' or a
+    list). Forms are labelled by
+    their first pitch class (P0 starts on C). Each form is a note list you can
+    use as a melody or slice into chords.
+    """
+    return _modern.twelve_tone_matrix(row)
+
+
+@mcp.tool()
+def pitch_class_set(notes: str | list) -> dict:
+    """Pitch-class set analysis: normal form, prime form, interval vector, complement, symmetry.
+
+    `notes`: notes or numbers 0-11 ('0 4 7' or a list). Prime form (Rahn's
+    algorithm, as in Straus) names the set class (every major/minor triad is
+    [0,3,7]; the whole-tone scale [0,2,4,6,8,10]). Useful for comparing
+    post-tonal sonorities.
+    """
+    return _modern.pitch_class_set(notes)
+
+
+@mcp.tool()
+def additive_process(notes: str | list[str], mode: str = "additive", repeats: int = 1, octave: int = 4) -> dict:
+    """Philip Glass's additive/subtractive process: 1 2, 1 2 3, 1 2 3 4 … over a figure.
+
+    `mode`: additive, subtractive or both; `repeats` repeats each stage. Notes
+    without an octave are placed once from `octave`, so every stage repeats the
+    same pitches. Returns the note sequence and stage boundaries for a notes track.
+    """
+    return _modern.additive_process(notes, mode=mode, repeats=repeats, octave=octave)
+
+
+@mcp.tool()
+def phase_shift(notes: str | list[str], repeats_per_stage: int = 2, step_beats: float = 0.25,
+                octave: int = 4) -> dict:
+    """Steve Reich's phasing: a pattern against a copy that slips one step ahead per stage.
+
+    The pattern may contain rests ('.') that rotate with it — 'C C C . C C . C .
+    C C .' is Clapping Music; Piano Phase's gradual drift is shown at its locked
+    positions. Returns both voices (plus rhythm strings when there are rests)
+    and a two-track render_hint for arrange_to_midi.
+    """
+    return _modern.phase_shift(notes, repeats_per_stage=repeats_per_stage, step_beats=step_beats,
+                               octave=octave)
 
 
 # ----------------------------------------------------------- song structure

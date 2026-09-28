@@ -18,6 +18,11 @@ EXPECTED_TOOLS = {
     "transpose_notes", "random_notes",
     # rhythm
     "random_rhythm", "euclidean_rhythm", "groove", "list_grooves",
+    # historical melody, named harmony rules, modern techniques
+    "church_mode", "solmization", "guido_vowel_melody", "check_melody", "cantus_firmus",
+    "rameau_fundamental_bass", "schoenberg_progressions", "bach_chorale_voicing", "neo_riemannian",
+    "bartok_axis", "coltrane_changes", "twelve_tone_matrix", "pitch_class_set", "additive_process",
+    "phase_shift",
     # structure
     "plan_sections", "arrange_song",
     # rendering

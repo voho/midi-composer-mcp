@@ -109,10 +109,12 @@ def _root_and_quality(item):
     """Resolve a chord (symbol or note array) to (root Note, ChordType, bass Note or None)."""
     if isinstance(item, str):
         return parse_chord_symbol(item)
-    res = match_chords(item, include_partial=False, limit=1)
+    res = match_chords(item, include_partial=False, limit=12)
     if not res["matches"]:  # a cluster that is no chord type: analyze it by its first note
         return parse_notes(item)[0], None, None
-    m = res["matches"][0]
+    # prefer the reading whose spelled notes are the ones written (D F Ab B is Bdim7/D, not Ddim7 with Cb)
+    written = {n.without_octave().name for n in parse_notes(item)}
+    m = next((m for m in res["matches"] if set(m["notes"]) == written), res["matches"][0])
     bass = parse_note(m["bass"]) if "bass" in m else None
     return parse_note(m["root"]), resolve_chord_type(m["chord_type"]), bass
 

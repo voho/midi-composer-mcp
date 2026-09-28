@@ -406,6 +406,10 @@ SCALE_GROUPS = [
      "Five- and six-note scales without the most tense intervals; almost any combination of their notes sounds good."),
     ("Symmetric scales", ["whole tone", "augmented", "diminished whole-half", "diminished half-whole", "prometheus"],
      "Scales built from a repeating pattern of steps. Because they repeat, they have fewer distinct transpositions and blur the sense of a home note."),
+    ("Messiaen's modes of limited transposition", ["messiaen mode 3", "messiaen mode 4", "messiaen mode 5",
+                                                  "messiaen mode 6", "messiaen mode 7"],
+     "Olivier Messiaen's symmetric modes: each repeats inside the octave, so it has only a few transpositions "
+     "before it returns to itself. Mode 1 is the whole-tone scale and mode 2 the half-whole octatonic scale."),
     ("Bebop and eight-note scales", ["bebop dominant", "bebop major", "spanish 8-tone"],
      "Seven-note scales with one extra passing note, so that in running eighth notes the chord tones fall on the beats."),
     ("Japanese and world pentatonics", ["hirajoshi", "in sen", "iwato", "kumoi", "yo", "balinese pelog"],
@@ -880,6 +884,158 @@ def ch_rhythm_form(story):
                  "the circle of fifths. That is a complete, coherent song built entirely from the rules in this book.")
 
 
+def ch_old_masters(story):
+    from midi_composer_mcp.chant import cantus_firmus, church_mode, guido_vowel_melody, solmization
+    from midi_composer_mcp.masters import bach_chorale_voicing, rameau_fundamental_bass, schoenberg_progressions
+    story += chapter(11, "Rules of the old masters",
+                     "Melody was codified long before harmony: chant modes, Guido's syllables, the cantus firmus. "
+                     "Then Rameau, Bach and Schoenberg put harmony into rules of their own.")
+    story += [P("The eight church modes", "h2"),
+              P("Gregorian chant is organised in eight modes, four pairs sharing a <b>final</b> (the note a melody ends "
+                "on): D, E, F and G. Each <i>authentic</i> mode spans the octave above its final; its <i>plagal</i> "
+                "partner (hypo-) lies a fourth lower. The <b>tenor</b> or reciting tone is the pitch psalms are "
+                "chanted on — the melodic centre of gravity.")]
+    rows = [["Mode", "Name", "Final", "Tenor", "Ambitus"]]
+    for k in range(1, 9):
+        m = church_mode(k)
+        rows.append([f"{m['roman']}", m["name"], m["final"][:-1], m["tenor"][:-1], " – ".join(m["ambitus"])])
+    story += [table(rows, [WIDTH * 0.1, WIDTH * 0.3, WIDTH * 0.14, WIDTH * 0.14, WIDTH * 0.32])]
+    sol = solmization("C D E F G A B C5")
+    story += [P("Guido's hexachords", "h2"),
+              P("Around 1030 Guido of Arezzo taught singers six syllables — <b>ut re mi fa sol la</b> — from the hymn "
+                "<i>Ut queant laxis</i>. They name a hexachord, not a key: <i>naturale</i> on C, <i>durum</i> on G "
+                "(with B natural) and <i>molle</i> on F (with B♭). The semitone is always <b>mi–fa</b>. To go beyond "
+                "six notes a singer <b>mutates</b> to another hexachord on a pivot note that belongs to both — by the "
+                "old rule <i>per re sursum, per la deorsum</i>: rising, the pivot is renamed re; falling, la. Notes "
+                "outside the gamut (F♯, E♭) are <i>musica ficta</i>, sung in a transposed hexachord: D E F♯ G is "
+                "ut re mi fa."),
+              table([["Note"] + [n.rstrip("5") for n in sol["notes"]], ["Syllable"] + sol["syllables"]],
+                    [WIDTH * 0.16] + [WIDTH * 0.105] * 8, zebra=False),
+              P(f"The mutation happens on {sol['mutations'][0]['note']}: {sol['mutations'][0]['from']} becomes "
+                f"{sol['mutations'][0]['to']}.", "small")]
+    g = guido_vowel_melody("Ut queant laxis resonare fibris", 1)
+    story += [P("Guido's vowel method", "h2"),
+              P("In the <i>Micrologus</i> (c. 1026) Guido proposed a way to find a melody for any text: write the vowels "
+                "a e i o u under the notes of the scale, starting on gamma (the low G) and repeating, then sing each "
+                "syllable on a note that carries its vowel. It is the oldest written recipe for composing by rule. "
+                "(The table below sits in the modern octave of the modes, so the Dorian final D carries u, as in "
+                "Guido's own table; a second row starting on B widens the choice.)"),
+              table([["Vowel"] + g["vowels"] + [""] * (len(g["notes"]) - len(g["vowels"])), ["Note"] + g["notes"]],
+                    [WIDTH * 0.13] + [WIDTH * 0.87 / len(g["notes"])] * len(g["notes"]), zebra=False),
+              P("Here each vowel takes the candidate nearest the previous note inside the Dorian range, and the tune "
+                "closes on the final D.", "small")]
+    cf = cantus_firmus("D", "dorian", 11, 2)
+    story += [P("The cantus firmus", "h2"),
+              P("Fux's pupils first learned to write a plain, singable line. The rules below are the ones modern "
+                "species-counterpoint teaching distils from Fux and Jeppesen (Fux's own cantus firmi occasionally "
+                "break the leap rules; the leading-tone rule comes from tonal teaching):"),
+              ]
+    story += bullets([
+        "Begin and end on the final; reach the last note by step.",
+        "Move mostly by step; allowed leaps are thirds, fourths, fifths, the ascending minor sixth and the octave — "
+        "never a tritone, a seventh or an augmented/diminished interval.",
+        "After a leap larger than a third, turn back by step (a gap wants filling).",
+        "No more than two leaps in a row; two leaps in the same direction must outline a consonance.",
+        "One climax only, somewhere in the middle; a range of about an octave, never beyond a tenth.",
+        "No repeated notes, no restated figures, no long scale runs.",
+        "In the Dorian, Mixolydian and Aeolian modes the note before the final may be raised a semitone "
+        "(musica ficta), as singers did at a cadence.",
+    ])
+    story += [P(f"A cantus firmus written by these rules in D Dorian: {notes(cf['notes'])}.", "body")]
+    prog = ["C", "F/A", "G7", "C", "Am", "Dm", "G", "C"]
+    rb = rameau_fundamental_bass(prog, "C")
+    story += [P("Rameau: the fundamental bass", "h2"),
+              P("Jean-Philippe Rameau (<i>Traité de l'harmonie</i>, 1722) argued that every chord grows from a root, "
+                "whatever note lies in the bass, and that good harmony moves its <b>fundamental bass</b> by fifths, "
+                "then thirds. He named the cadences by that motion: <i>cadence parfaite</i> when the fundamental bass "
+                "falls a fifth from dominant to tonic, <i>cadence irrégulière</i> when it rises a fifth (IV–I or "
+                "I–V), <i>cadence rompue</i> for V–vi."),
+              P(f"Under {' '.join(prog)} the fundamental bass is {notes(rb['fundamental_bass'])}: "
+                f"{rb['summary']['fifth']} moves by fifth, {rb['summary']['third']} by third, {rb['summary']['step']} by step.")]
+    sp = schoenberg_progressions(prog)
+    story += [P("Schoenberg: ascending, descending and superstrong progressions", "h2"),
+              P("In <i>Structural Functions of Harmony</i> (1954) Arnold Schoenberg classified root motion by what it "
+                "does to the previous root. <b>Ascending</b> (strong) progressions — root up a fourth or down a third — "
+                "absorb the old root as a lesser member of the new chord and push forward. <b>Descending</b> "
+                "progressions — root up a fifth or up a third — do the opposite (later writers call them weak; "
+                "Schoenberg avoided the word). <b>Superstrong</b> progressions move the root by step and share no "
+                "tones. He advised building mainly on ascending ones."),
+              P("For the same progression: " + ", ".join(f"{k}: {v}" for k, v in sp["summary"].items()) + ".", "small")]
+    ch = bach_chorale_voicing(["C", "Am", "F", "G7", "C"], "C")
+    rows = [["Voice"] + [c["symbol"] for c in ch["chords"]]]
+    for v in ("soprano", "alto", "tenor", "bass"):
+        rows.append([v] + ch["voices"][v])
+    story += [P("Bach: four-part chorale writing", "h2"),
+              P("J. S. Bach's 371 four-part chorales became the textbook of harmony; the rules below are the ones "
+                "teachers distilled from them. Four voices (soprano, alto, tenor, bass) in their ranges; upper voices "
+                "within an octave of each other; the bass on the root or the given inversion; complete chords, root "
+                "doubled by preference, never the leading tone; no parallel fifths or octaves between any two "
+                "voices; no voice overlapping its neighbour; the leading tone rises and a chord seventh falls."),
+              table(rows, [WIDTH * 0.2] + [WIDTH * 0.16] * 5)]
+
+
+def ch_modern(story):
+    from midi_composer_mcp.masters import bartok_axis, coltrane_changes, neo_riemannian
+    from midi_composer_mcp.modern import additive_process, pitch_class_set, twelve_tone_matrix
+    story += chapter(12, "Modern approaches",
+                     "Twentieth-century composers and theorists found new rules: transformations, axes, rows, sets "
+                     "and processes.")
+    nr = neo_riemannian("C", "LRLR")
+    story += [P("Neo-Riemannian transformations", "h2"),
+              P("Following Hugo Riemann, David Lewin and Richard Cohn describe three moves between major and minor "
+                "triads that keep two notes and move the third by a step: <b>P</b> (parallel: C ↔ Cm), <b>R</b> "
+                "(relative: C ↔ Am) and <b>L</b> (leading-tone exchange: C ↔ Em). Chaining them produces the "
+                "smooth, key-less triad progressions heard in late Romantic and film music."),
+              P(f"C, then L R L R: {' → '.join(nr['symbols'])}.", "body")]
+    ax = bartok_axis("C")
+    story += [P("Bartók's axis system", "h2"),
+              P("Ernő Lendvai showed that Bartók treats keys a minor third apart as functional equivalents. Each "
+                "function forms an axis of four keys — a pole, its counterpole a tritone away, and two secondary poles."),
+              table([["Axis", "Pole", "Counterpole", "Secondary poles"]] + [
+                  [name, a["pole"], a["counterpole"], " ".join(a["secondary_poles"])]
+                  for name, a in (("tonic", ax["tonic_axis"]), ("subdominant", ax["subdominant_axis"]),
+                                  ("dominant", ax["dominant_axis"]))],
+                  [WIDTH * 0.25] * 4)]
+    co = coltrane_changes("C")
+    story += [P("Coltrane changes", "h2"),
+              P("In <i>Giant Steps</i> (1959) John Coltrane replaced the ii–V–I with a whirl through three tonal "
+                "centres a major third apart, each approached by its own dominant."),
+              table([["Original"] + co["original"] + [""] * 4, ["Coltrane"] + co["coltrane"]],
+                    [WIDTH * 0.16] + [WIDTH * 0.12] * 7, zebra=False)]
+    m = twelve_tone_matrix("E F G Db Gb Eb Ab D B C A Bb")
+    story += [P("Schoenberg's twelve-tone method", "h2"),
+              P("A <b>row</b> orders all twelve pitch classes; the piece is built from its 48 forms — the prime (P), "
+                "inversion (I), retrograde (R) and retrograde inversion (RI), each in twelve transpositions. The "
+                "matrix shows them all: rows read left to right are P forms, columns top to bottom are I forms."),
+              table([[""] + [f"I{c}" for c in m["matrix_numbers"][0]]] +
+                    [[f"P{r[0]}"] + m["matrix"][k] for k, r in enumerate(m["matrix_numbers"])],
+                    [WIDTH * 0.1] + [WIDTH * 0.075] * 12, zebra=False),
+              P("Forms are labelled by their first pitch class (C = 0); this row is Schoenberg's own, from the Suite "
+                "for Piano, Op. 25.", "small")]
+    story += [P("Pitch-class sets", "h2"),
+              P("Allen Forte and John Rahn classify any collection of pitch classes by its <b>prime form</b> — the most "
+                "compact version of it or of its inversion, transposed to start on 0 — and its <b>interval vector</b>, "
+                "the count of each interval class between its notes. Every major and minor triad shares one set class. "
+                "(Prime forms here follow Rahn's packing, as most textbooks now do; Forte's original table packs six "
+                "set classes differently.)")]
+    rows = [["Collection", "Prime form", "Interval vector"]]
+    for label, ns in (("C major triad", "C E G"), ("A minor triad", "A C E"), ("Diminished seventh", "B D F Ab"),
+                      ("Whole-tone scale", "C D E F# G# A#"), ("C major scale", "C D E F G A B")):
+        r = pitch_class_set(ns)
+        rows.append([label, "[" + ",".join(map(str, r["prime_form"])) + "]", "<" + "".join(map(str, r["interval_vector"])) + ">"])
+    story += [table(rows, [WIDTH * 0.36, WIDTH * 0.34, WIDTH * 0.3])]
+    story += [P("Messiaen's modes of limited transposition", "h2"),
+              P("Olivier Messiaen used seven symmetric scales that return to themselves after a few transpositions — "
+                "the whole-tone scale is mode 1, the half-whole octatonic scale mode 2; modes 3 to 7 appear in the "
+                "scale catalogue of chapter 3.")]
+    ad = additive_process("C D E F")
+    story += [P("Minimalist processes", "h2"),
+              P("Philip Glass builds music by <b>additive process</b>: a figure grows one note at a time "
+                f"({' | '.join(' '.join(ad['notes'][st['start']:st['start'] + st['length']]) for st in ad['stages'])}). "
+                "Steve Reich's <b>phasing</b> sets a pattern against a copy of itself that slips one step ahead at "
+                "each stage until the two voices meet again — the process of <i>Piano Phase</i> and <i>Clapping Music</i>.")]
+
+
 def appendix(story):
     story += [NextPageTemplate("main"), PageBreak(), P("APPENDIX", "kicker"), P("Glossary", "h1")]
     terms = [
@@ -923,7 +1079,7 @@ def build(path: str) -> str:
     story: list = []
     front_matter(story, toc)
     for fn in (ch_notes, ch_intervals, ch_scales, ch_chords, ch_harmony, ch_circle, ch_voice_leading,
-               ch_melody, ch_counterpoint, ch_rhythm_form, appendix):
+               ch_melody, ch_counterpoint, ch_rhythm_form, ch_old_masters, ch_modern, appendix):
         fn(story)
     doc.multiBuild(story)
     return path

@@ -671,7 +671,8 @@ def test_random_notes_pool_counts_each_note_once():
 
 # ------------------------------------------- only ValueErrors, never crashes
 
-_BAD_VALUES = [None, 7, -1, 3.5, True, "", "zz", [], [None], {}, {"a": 1}, ["C", 5], "C" * 5]
+_BAD_VALUES = [None, 7, -1, 3.5, 2.0, True, "", "zz", [], [None], {}, {"a": 1}, ["C", 5], "C" * 5,
+               ["C", "Db", "D"], [["C", "Db", "D"], "G"], "0 4 7", ["C", ".", "E"]]  # clusters, numbers, rests
 
 
 def test_tools_reject_bad_input_with_value_errors(tmp_path):
@@ -683,7 +684,8 @@ def test_tools_reject_bad_input_with_value_errors(tmp_path):
             "form": "verse", "motifs": {"A": "C4 D4"}, "lanes": {"kick": "O..."}, "tracks": [{"type": "notes", "notes": ["C4"]}],
             "sections": {"v": {"tracks": [{"type": "notes", "notes": ["C4"]}]}}, "chord_type": "m7",
             "note_a": "C", "note_b": "E", "target": "Dm", "symbol": "G7", "tonic": "C", "name": "tresillo",
-            "pulses": 3, "midi_file": None, "melody_notes": ["C5"], "semitones": 2}
+            "pulses": 3, "midi_file": None, "melody_notes": ["C5"], "semitones": 2, "mode": 1,
+            "text": "Ut queant laxis", "operations": "PLR", "key": "C", "chord": "C", "row": "C C# D D# E F F# G G# A A# B"}
     skip = {"midi_to_audio", "list_scales", "list_chords", "list_grooves"}
     failures = []
     for name, fn in inspect.getmembers(server, inspect.isfunction):

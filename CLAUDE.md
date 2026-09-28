@@ -35,6 +35,10 @@ decides *which* rules to invoke and *how* to combine them to serve the goal.
    - **scale degrees** as integers (`[1,2,3,5]`, octave-wrapping, 1-based).
    - **rhythm** as patterns: `O` strong beat, `o` weak beat, `.` rest.
    - **tracks** and **sections** as plain objects for the renderers/assembler.
+   Rule sets named after a composer or theorist (Rameau, Schoenberg, Bach, Guido,
+   Fux, Coltrane, Messiaen, Glass, Reich…) must be faithful to that source and
+   say so in the docstring; if a detail is a later pedagogical codification
+   (e.g. "Bach-chorale rules" as taught from his chorales), say that too.
    So `get_scale` → `notes` feeds `match_chords`, `random_notes`,
    `notes_to_midi`; `degrees_to_chords` → `symbols` feeds `voice_leading`,
    `chords_to_midi`, a section; `tintinnabuli_voice` → two note lists feed two
@@ -77,6 +81,9 @@ src/midi_composer_mcp/
   harmony.py      # intervals, roman-numeral analysis, voice leading, reharmonization
   melody.py       # degrees, arpeggios, walks, motif grammar, sequence, snap, tintinnabuli
   counterpoint.py # species counterpoint 1-5 (deterministic, rule-following)
+  chant.py        # Gregorian modes, Guido solmization + vowel method, cantus-firmus rules/generator
+  masters.py      # named rule sets: Rameau, Schoenberg, Bach chorale SATB, neo-Riemannian, Bartók, Coltrane
+  modern.py       # twelve-tone matrix, pitch-class sets, Glass additive process, Reich phasing
   generate.py     # the contained randomness + euclidean rhythm + groove presets
   structure.py    # song structure: plan sections, assemble a whole song
   midi_io.py      # technical: deterministic MIDI rendering (mido)
@@ -106,6 +113,10 @@ src/midi_composer_mcp/
 uv venv && uv pip install -e ".[dev]"
 .venv/bin/python -m pytest        # full suite
 ```
+
+`docs/book/build_book.py` (the PDF book) and `docs/carousels/build_carousels.py`
+(the Czech LinkedIn decks) are generated from the same tools: rebuild them
+(`pip install -e ".[book]"`) after changing a rule they show.
 
 `examples/generate_examples.py` renders worked pieces end to end (style demos,
 an Arvo Pärt tintinnabuli study, a full verse/chorus/bridge song) using only

@@ -24,7 +24,7 @@ The toolset is organized by **layer** — scales, chords, harmony rules, melody,
 
 | Tool | What it does |
 |---|---|
-| `list_scales` / `get_scale` | 40+ scale types (common, modal, jazz, symmetric, world/exotic), each with a description; generate notes from a root. `maj + C → C D E F G A B C`. |
+| `list_scales` / `get_scale` | 50 scale types (common, modal, jazz, symmetric, world/exotic), each with a description; generate notes from a root. `maj + C → C D E F G A B C`. |
 | `list_chords` / `get_chord` | 35+ chord types (triads → 13ths and altered), each with a description; generate notes. `min + F → F Ab C`. |
 | `match_scales` / `match_chords` | Find scales/chords containing given notes (**octaves ignored**); inversions detected (`e g c → C/E`), partials list missing notes. |
 | `diatonic_chords` | The chord on each scale degree, with roman numerals, degree names and harmonic functions. |
@@ -56,6 +56,38 @@ The toolset is organized by **layer** — scales, chords, harmony rules, melody,
 | `snap_to_scale` | Snap any line to the nearest scale notes — guarantees a melody fits the key/chords. |
 | `transpose_notes` | Transpose a note list by semitones, spelled as one interval so it stays in one key (`F A C` +1 → `Gb Bb Db`). |
 | `random_notes` | 🎲 Uniform random picks from any note pool (seeded); repeated pool notes count once. |
+
+### Historical melody rules
+
+| Tool | What it does |
+|---|---|
+| `church_mode` | The eight **Gregorian modes** (Dorian … Hypomixolydian): final, reciting tone (tenor), ambitus. |
+| `solmization` | **Guido of Arezzo's hexachords**: sing any line as ut re mi fa sol la, mutating *per re sursum, per la deorsum*; musica ficta in transposed hexachords (mi–fa is always the semitone). |
+| `guido_vowel_melody` | **Guido's vowel method** (*Micrologus*, c. 1026): a chant melody derived from the vowels of a text (Latin syllabification, one or both of Guido's vowel rows) — arguably the oldest composition algorithm. |
+| `check_melody` | Lint a line against the **cantus-firmus rules** of species-counterpoint teaching, after Fux and Jeppesen (leap recovery, single climax, forbidden intervals, modal cadences…); every violation with its index. `strict=False` relaxes the leap rules that Fux's own cantus firmi break. |
+| `cantus_firmus` | Compose a cantus firmus that passes all those rules — deterministic; every `variant` 0, 1, 2… is a different melody. |
+
+### Harmony rules of the masters
+
+| Tool | What it does |
+|---|---|
+| `rameau_fundamental_bass` | **Rameau** (1722): the root line under any progression; root motion by fifth/third/step; cadence parfaite, irrégulière, rompue. |
+| `schoenberg_progressions` | **Schoenberg**'s root-progression classes: ascending (strong), descending, superstrong — read from the sounding interval, so spelling never matters. |
+| `bach_chorale_voicing` | **Bach-chorale** four-part (SATB) voicing: ranges, spacing, doubling, no parallels/overlaps, leading tone up, sevenths down — plus a four-track `render_hint`. |
+| `neo_riemannian` | **Riemann / Lewin / Cohn** P, L, R triad transformations (C → Em → G → Bm …). |
+| `bartok_axis` | **Bartók**'s axis system (Lendvai): tonic, subdominant and dominant axes of minor-third-related keys. |
+| `coltrane_changes` | **Coltrane** changes: a ii–V–I through three tonal centres a major third apart (*Giant Steps*). |
+
+### Modern techniques
+
+| Tool | What it does |
+|---|---|
+| `twelve_tone_matrix` | **Schoenberg**'s twelve-tone method: the 12×12 matrix and all 48 row forms (P, I, R, RI). |
+| `pitch_class_set` | **Forte/Rahn** set theory: normal form, prime form (Rahn's algorithm, as in Straus), interval vector, complement, symmetry. Numbers work too: `"0 4 7"`. |
+| `additive_process` | **Philip Glass**'s additive/subtractive process (1 2, 1 2 3, 1 2 3 4 …); the figure's register is fixed once, so every stage repeats the same pitches. |
+| `phase_shift` | **Steve Reich**'s phasing: a pattern against a copy slipping one step per stage, as two tracks. Rests (`.`) rotate with it, so `"C C C . C C . C . C C ."` is *Clapping Music*. |
+
+**Messiaen's modes of limited transposition** are in the scale database (`get_scale("messiaen mode 3", "C")`; modes 1 and 2 are the whole-tone and half-whole octatonic scales).
 
 ### Rhythm
 
@@ -162,6 +194,27 @@ harmonize_melody(["C5","E5","F5","A5","G5"], root="C", scale_type="major", in_sc
    → plus ranked `options` per note and a render_hint (harmony + melody) for arrange_to_midi
 ```
 
+**"Which Gregorian mode is this, and how would a medieval singer solmize it?"**
+```
+church_mode("Hypodorian")                     → final D, tenor F, ambitus A3–A4
+solmization("C D E F G A B C5")               → ut re mi fa sol re mi fa  (mutation la→re on A: per re sursum)
+solmization("D5 C5 B4 A4 G4 F4 E4 D4")        → sol fa mi la sol fa mi re  (re→la on A: per la deorsum)
+solmization("D E F# G")                       → ut re mi fa  (F# is musica ficta: mi of a hexachord on D)
+```
+
+**"Is my melody a good cantus firmus? Write me one in D Dorian."**
+```
+check_melody(["C4","A4","B4","G4","F4","E4","D4","C4"], "C")  → interval: C4 → A4 is a major sixth; leap_recovery: it is not followed by a step back
+cantus_firmus("D", "dorian", length=11, variant=2)            → an 11-note line passing every cantus-firmus rule
+```
+
+**"Reharmonize a ii–V–I the Coltrane way, then voice it; and give me a neo-Riemannian chain."**
+```
+coltrane_changes("C")          → Dm7 Eb7 Abmaj7 B7 Emaj7 G7 Cmaj7
+voice_leading(<those symbols>) → smooth pads
+neo_riemannian("C", "LRLR")    → C Em G Bm D   (each step keeps two notes)
+```
+
 ### Advanced
 
 **"Write a third-species counterpoint to a cantus firmus."**
@@ -200,6 +253,25 @@ arrange_song({                                                        # sequence
 }, form="verse verse chorus", tempo=72)   →   midi_to_audio(<the song>)
 ```
 
+**"Set 'Ut queant laxis' as Guido would, harmonize the result in four parts like a Bach chorale, and check its root progressions against Rameau and Schoenberg."**
+```
+guido_vowel_melody("Ut queant laxis resonare fibris", "Dorian")    → a D-Dorian chant closing on D
+harmonize_melody(<the notes>, root="D", scale_type="dorian", in_scale=True) → a chord under each note
+bach_chorale_voicing(<the progression>, root="D", scale_type="dorian", melody=<the notes>)
+                                                                    → SATB with the chant in the soprano
+rameau_fundamental_bass(<progression>, "D", "dorian"); schoenberg_progressions(<progression>)
+arrange_to_midi(<bach_chorale_voicing render_hint tracks>)         → a four-part chorale .mid
+```
+
+**"A twelve-tone piece: the row, its inversion as a counter-line, and a Reich-style phase canon on a fragment."**
+```
+m = twelve_tone_matrix("E F G C# F# D# D B C A Bb G#")
+arrange_to_midi([{"type":"notes","notes":m["forms"]["P4"],"octave":5},
+                 {"type":"notes","notes":m["forms"]["I9"],"octave":3}])
+phase_shift(m["forms"]["P4"][:6], repeats_per_stage=4)  → two voices drifting out of and back into phase
+pitch_class_set(m["forms"]["P4"][:3])                   → the set class of the opening trichord
+```
+
 These advanced examples (a Pärt tintinnabuli study, a species-3 counterpoint, the tintinnabuli verse/chorus song, and a full verse/chorus/bridge song) are runnable in **`examples/generate_examples.py`**:
 
 ```bash
@@ -216,7 +288,7 @@ python demos/generate.py                        # rewrites demos/*.mid and *.wav
 
 ### The book and the carousels
 
-[**`docs/book/the-rules-of-harmony.pdf`**](docs/book/the-rules-of-harmony.pdf) is a ~40-page musician's guide generated from the same rule tables the tools run: notes and spelling, intervals, all 45 scales and 37 chord types (each with a keyboard diagram), harmony in a key, the circle of fifths, voice leading and reharmonization, melody craft and tintinnabuli, species counterpoint, rhythm and form. [**`docs/carousels/`**](docs/carousels/) holds eight 2:3 slide decks (major scales in all 12 keys, the modes, diatonic chords per key, chord symbols, the circle of fifths key by key, negative harmony per key, counterpoint rules, Euclidean rhythms). Rebuild both after changing a rule:
+[**`docs/book/the-rules-of-harmony.pdf`**](docs/book/the-rules-of-harmony.pdf) is a 44-page musician's guide generated from the same rule tables the tools run: notes and spelling, intervals, all 50 scales and 37 chord types (each with a keyboard diagram), harmony in a key, the circle of fifths, voice leading and reharmonization, melody craft and tintinnabuli, species counterpoint, rhythm and form, the rules of the old masters (church modes, Guido's hexachords and vowel method, the cantus firmus, Rameau, Schoenberg, Bach chorales) and modern approaches (neo-Riemannian transformations, Bartók's axes, Coltrane changes, twelve-tone rows, pitch-class sets, Messiaen, Glass, Reich). [**`docs/carousels/`**](docs/carousels/) holds *Hudební teorie v kostce*, eight Czech 2:3 slide decks for LinkedIn (major scales in all 12 keys, church modes, the T–S–D chords of every key, chord symbols and inversions, the circle of fifths key by key, negative harmony in every key, Fux counterpoint as piano rolls, Euclidean rhythms as necklaces), set in Avenir Next Condensed with Czech note names and terminology (H = B, B = B♭, dur/moll, sextakord…). Rebuild both after changing a rule:
 
 ```bash
 pip install -e ".[book]"
@@ -319,6 +391,9 @@ src/midi_composer_mcp/
   diatonic.py     # chords per scale degree, degree-sequence resolution
   circle.py       # circle of fifths: key signatures and related keys
   forms.py        # form strings ('AABA', 'intro verse chorus') -> ordered labels
+  chant.py        # Gregorian modes, Guido's solmization and vowel method, cantus-firmus rules
+  masters.py      # Rameau, Schoenberg, Bach chorales, neo-Riemannian, Bartók axes, Coltrane changes
+  modern.py       # twelve-tone matrix, pitch-class sets, Glass additive process, Reich phasing
   harmony.py      # intervals, roman-numeral analysis, voice leading, reharmonization
   melody.py       # degrees, arpeggios, walks, motif grammar, sequence, snap, tintinnabuli
   counterpoint.py # species counterpoint 1-5 (deterministic, rule-following)
@@ -334,6 +409,7 @@ src/midi_composer_mcp/
 - Rhythmic chord comping (a `rhythm` on chord tracks, for stabs/funk/reggae)
 - Swing/shuffle and humanize (timing/velocity jitter as a seeded, mechanical step)
 - Secondary-dominant labelling in `analyze_progression` (`A7` in C as `V7/ii`, not just a flagged `VI7`)
-- A `check_counterpoint` / `lint_progression` tool that reports rule violations in the caller's own lines
+- A `check_counterpoint` / `lint_progression` tool that reports rule violations in the caller's own lines (like `check_melody` for cantus lines)
+- Psalm-tone recitation formulas for the eight modes; Palestrina-style (Jeppesen) melodic rules beyond the cantus
 - Key detection and pivot-chord modulation planning
 - Reading MIDI files back into note/chord data; MusicXML export for notation
