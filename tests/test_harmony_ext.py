@@ -13,7 +13,13 @@ import pytest
 
 from midi_composer_mcp import harmony
 from midi_composer_mcp.chords import CHORDS, chord_notes
-from midi_composer_mcp.diatonic import _HARMONIC_FUNCTIONS, _ROMAN_BASE, diatonic_chords, roman_suffix
+from midi_composer_mcp.diatonic import (
+    _HARMONIC_FUNCTIONS,
+    _ROMAN_BASE,
+    borrowing_sources,
+    diatonic_chords,
+    roman_suffix,
+)
 from midi_composer_mcp.diatonic import numeral_base as _numeral_base
 from midi_composer_mcp.harmony import (
     PISTON_1941,
@@ -27,7 +33,7 @@ from midi_composer_mcp.harmony import (
 )
 from midi_composer_mcp.notes import LETTERS, parse_note, parse_notes
 from midi_composer_mcp.roman import read_chord, roman_to_chords
-from midi_composer_mcp.scales import MAJOR_DEGREES, resolve_scale_type
+from midi_composer_mcp.scales import MAJOR_DEGREES, resolve_scale_type, scale_notes
 
 TONICS = ["C", "G", "D", "A", "E", "B", "F#", "C#", "F", "Bb", "Eb", "Ab", "Db", "Gb"]
 MINOR_TONICS = ["A", "E", "B", "F#", "C#", "G#", "D#", "D", "G", "C", "F", "Bb", "Eb", "Ab"]
@@ -176,6 +182,37 @@ def test_borrowed_from():
                                                                 "A major"]
     assert one("D", "A", "natural minor")["applied"] == "V/bVII"      # applied, so not 'borrowed'
     assert one("F#m", "C")["borrowed_from"] == []               # outside every parallel mode
+
+
+def test_borrowed_from_judges_letters_not_semitones():
+    """Mixture is built from the parallel mode's spelled degrees: G# is not C minor's bVI (Ab)."""
+    assert one("Ab")["borrowed_from"] == ["C harmonic minor", "C natural minor", "C phrygian", "C locrian"]
+    g_sharp = chords_of(["C", "G#", "C"])[1]
+    assert g_sharp["roman"] == "#V" and g_sharp["borrowed_from"] == []
+    assert chords_of(["C", "F#", "C"])[1]["borrowed_from"] == []    # C locrian has Gb, not F#
+    assert one("Gb")["borrowed_from"] == ["C locrian"]
+    for symbol in ("G#m", "Abm", "G+"):                              # #v, bvi (needs Cb), V+ (needs D#)
+        assert one(symbol)["borrowed_from"] == [], symbol
+    assert "borrowed_from" not in one("E")                          # V/vi: applied, not mixture
+    assert one(["Ab3", "C4", "Eb4"])["borrowed_from"] == one("Ab")["borrowed_from"]
+    assert one(["G#3", "C4", "D#4"])["borrowed_from"] == []         # the same pitches, misspelled
+
+
+_MIXTURE_LINE = "iv bVI bIII bVII ii° bII II v i° biii bV V+ III bvi #v #IV #V iiø7 bVII7 IV7"
+
+
+@pytest.mark.parametrize("tonic", TONICS)
+def test_borrowed_from_sources_spell_the_chord_in_every_key(tonic):
+    spelled = {s["label"]: {n.pitch_class_name for n in scale_notes(s["scale"], s["tonic"])}
+               for s in borrowing_sources(tonic, "major")}
+    ref = chords_of(roman_to_chords(_MIXTURE_LINE, "C")["symbols"], "C")
+    got = chords_of(roman_to_chords(_MIXTURE_LINE, tonic)["symbols"], tonic)
+    for token, a, b in zip(_MIXTURE_LINE.split(), ref, got, strict=True):
+        assert [s.split(" ", 1)[1] for s in b.get("borrowed_from", [])] == \
+               [s.split(" ", 1)[1] for s in a.get("borrowed_from", [])], (tonic, token)
+        notes = {n.pitch_class_name for n in parse_notes(roman_to_chords(token, tonic)["chords"][0]["notes"])}
+        for label in b.get("borrowed_from", []):
+            assert notes <= spelled[label], (tonic, token, label)
 
 
 def test_minor_numerals_follow_roman_to_chords():
