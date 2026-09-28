@@ -29,9 +29,11 @@ def random_notes(notes: str | list, count: int = 4, allow_repeats: bool = True,
     """Pick `count` random notes from a pool of notes.
 
     The pool is any list of notes — typically the `notes` output of a scale,
-    chord or another tool. Octaves are kept if the pool has them.
+    chord or another tool. Octaves are kept if the pool has them. Repeated pool
+    entries count once (get_scale repeats its root on top), so every distinct
+    note is equally likely and allow_repeats=False never repeats a note.
     """
-    pool = parse_notes(notes)
+    pool = list(dict.fromkeys(parse_notes(notes)))  # de-duplicate, keeping order
     if not isinstance(count, int) or isinstance(count, bool) or count < 1:
         raise ValueError(f"count must be a positive integer, got {count!r}")
     if count > 1000:

@@ -17,7 +17,10 @@ def test_notes_from_degrees():
     assert notes_from_degrees("C", "major", "1 3 5")["notes"] == ["C", "E", "G"]
     # octave wrap up and down
     assert notes_from_degrees("C", "major", [1, 8, 9])["notes"] == ["C", "C", "D"]
-    assert notes_from_degrees("C", "major", [-7, 1])["notes"] == ["B", "C"]
+    # negative degrees use the no-zero number line: -1 = one step below the root,
+    # -7 = the root an octave down (the same line motif_grammar transforms on)
+    assert notes_from_degrees("C4", "major", [-1, -3, -7, 1])["notes"] == ["B3", "G3", "C3", "C4"]
+    assert notes_from_degrees("A3", "minor pentatonic", [-1, -5])["notes"] == ["G3", "A2"]
     # transposable contour: same degrees, different key/scale
     assert notes_from_degrees("A", "minor pentatonic", [1, 2, 3])["notes"] == ["A", "C", "D"]
     with pytest.raises(ValueError):

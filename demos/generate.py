@@ -121,7 +121,8 @@ def jazz_reharm(out):
         root, ctype, _ = parse_chord_symbol(c)
         tones = chord_info(ctype.name, root.pitch_class_name)["notes"]
         guide += [tones[1], tones[3]]
-    return render_arrangement([
+    numerals = [c["roman"] for c in analyze_progression(chords, "C", "major")["chords"]]
+    result = render_arrangement([
         {"type": "chords", "name": "comp", "chords": voiced, "beats_per_chord": 4, "program": 0, "velocity": 64},
         {"type": "notes", "name": "walk", "notes": walk, "step_beats": 1.0, "octave": 2, "program": 32, "velocity": 88},
         {"type": "notes", "name": "head", "notes": guide, "step_beats": 2.0, "octave": 4,
@@ -129,6 +130,8 @@ def jazz_reharm(out):
         {"type": "drums", "name": "swing", "step_beats": 0.5,
          "lanes": {"ride": "o.O.o.O." * 12, "pedal_hat": "..O...O." * 12}},
     ], tempo=146, output_dir=out, file_name="03_jazz_reharm.mid")
+    result["analysis"] = " ".join(f"{c}={n}" for c, n in zip(chords, numerals))
+    return result
 
 
 # ============================== 4. COUNTERPOINT SUITE (all five species, one cantus)
@@ -225,6 +228,8 @@ def main() -> None:
         peak = max(abs(s) for s in struct.unpack("<%dh" % (len(frames) // 2), frames))
         print(f"\n{midi['file_name']}  ({midi['duration_seconds']:.1f}s, peak {peak})")
         print(f'  prompt: "{prompt}"')
+        if "analysis" in midi:
+            print(f"  analysis: {midi['analysis']}")
 
 
 if __name__ == "__main__":

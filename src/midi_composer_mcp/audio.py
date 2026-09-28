@@ -149,13 +149,32 @@ def _add_drum(buf: array.array, sample_rate: int, start: float, note: int,
 
 
 def render_midi_to_wav(midi_path: str, wav_path: str | None = None,
-                       sample_rate: int = 44100, max_seconds: float = 300.0) -> dict:
-    """Synthesize `midi_path` into a 16-bit mono WAV and return its path + base64."""
-    if not os.path.isfile(midi_path):
+                       sample_rate: int = 44100, max_seconds: float = 300.0,
+                       include_base64: bool = False) -> dict:
+    """Synthesize `midi_path` into a 16-bit mono WAV and return its path (+ base64 on request).
+
+    The WAV goes next to the MIDI file unless `wav_path` is given (its folder is
+    created). At most `max_seconds` are rendered; notes still sounding at the cut
+    are held to it. The base64 copy of the audio is off by default — a WAV is
+    far too large for most tool-result limits.
+    """
+    if not isinstance(midi_path, str) or not os.path.isfile(midi_path):
         raise ValueError(f"MIDI file not found: {midi_path}")
-    if not 8000 <= sample_rate <= 48000:
-        raise ValueError(f"sample_rate must be between 8000 and 48000, got {sample_rate}")
-    mid = mido.MidiFile(midi_path)
+    if not isinstance(sample_rate, int) or isinstance(sample_rate, bool) or not 8000 <= sample_rate <= 48000:
+        raise ValueError(f"sample_rate must be an integer between 8000 and 48000, got {sample_rate!r}")
+    if wav_path is None:
+        root, _ = os.path.splitext(midi_path)
+        wav_path = root + ".wav"
+    wav_path = os.path.abspath(wav_path)
+    if wav_path == os.path.abspath(midi_path) or (
+            os.path.exists(wav_path) and os.path.samefile(wav_path, midi_path)):  # also 'A.mid' vs 'a.mid'
+        raise ValueError("wav_file must differ from the MIDI file (it would be overwritten)")
+    try:
+        mid = mido.MidiFile(midi_path)
+    except (OSError, EOFError, KeyError, IndexError, ValueError) as e:
+        raise ValueError(f"not a readable MIDI file: {midi_path} ({e})") from e
+    if mid.type == 2:
+        raise ValueError("MIDI type 2 (asynchronous tracks) is not supported; use a type 0 or 1 file")
 
     # Collect note voices with absolute start/duration in seconds.
     programs: dict[int, int] = {}
@@ -172,7 +191,14 @@ def render_midi_to_wav(midi_path: str, wav_path: str | None = None,
         if msg.type == "program_change":
             programs[msg.channel] = msg.program
         elif msg.type == "note_on" and msg.velocity > 0:
-            active[(msg.channel, msg.note)] = (now, msg.velocity, programs.get(msg.channel, 0))
+            key = (msg.channel, msg.note)
+            if key in active:  # re-struck while sounding: end the earlier note here
+                start, velocity, program = active.pop(key)
+                if msg.channel == 9:
+                    drums.append((start, msg.note, velocity))
+                else:
+                    voices.append((start, max(0.02, now - start), msg.channel, msg.note, velocity, program))
+            active[key] = (now, msg.velocity, programs.get(msg.channel, 0))
         elif msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
             key = (msg.channel, msg.note)
             started = active.pop(key, None)
@@ -183,14 +209,16 @@ def render_midi_to_wav(midi_path: str, wav_path: str | None = None,
                 drums.append((start, msg.note, velocity))
             else:
                 voices.append((start, max(0.02, now - start), msg.channel, msg.note, velocity, program))
-    # Notes still held when the file ends (or was truncated): give them a tail.
+    # Notes still held at the cut are held to it; notes left hanging at the natural end
+    # of the file get a short tail.
     for (channel, note), (start, velocity, program) in active.items():
         if channel == 9:
             drums.append((start, note, velocity))
         else:
-            voices.append((start, 0.3, channel, note, velocity, program))
+            tail = max(0.02, max_seconds - start) if duration_limited else 0.3
+            voices.append((start, tail, channel, note, velocity, program))
 
-    end = 0.0
+    end = max_seconds if duration_limited else min(now, max_seconds)  # trailing rests count
     for start, dur, *_ in voices:
         end = max(end, start + dur)
     for start, *_ in drums:
@@ -213,27 +241,25 @@ def render_midi_to_wav(midi_path: str, wav_path: str | None = None,
         v = int(buf[i] * scale)
         pcm[i] = -32768 if v < -32768 else 32767 if v > 32767 else v
 
-    if wav_path is None:
-        root, _ = os.path.splitext(midi_path)
-        wav_path = root + ".wav"
-    wav_path = os.path.abspath(wav_path)
+    os.makedirs(os.path.dirname(wav_path), exist_ok=True)
     with wave.open(wav_path, "wb") as wav:
         wav.setnchannels(1)
         wav.setsampwidth(2)
         wav.setframerate(sample_rate)
         wav.writeframes(pcm.tobytes())
 
-    with open(wav_path, "rb") as fh:
-        data = fh.read()
-    return {
+    result = {
         "file": wav_path,
         "file_name": os.path.basename(wav_path),
-        "size_bytes": len(data),
+        "size_bytes": os.path.getsize(wav_path),
         "format": "WAV (16-bit PCM, mono)",
         "sample_rate": sample_rate,
         "duration_seconds": round(total_samples / sample_rate, 3),
         "note_count": len(voices),
         "drum_count": len(drums),
         "truncated": duration_limited,
-        "base64": base64.b64encode(data).decode("ascii"),
     }
+    if include_base64:
+        with open(wav_path, "rb") as fh:
+            result["base64"] = base64.b64encode(fh.read()).decode("ascii")
+    return result

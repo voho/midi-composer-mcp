@@ -147,7 +147,12 @@ def transpose(root: Note, semitones: int, letter_steps: int | None = None) -> No
         accidental = target_offset - (LETTER_PCS[letter] + 12 * octave_carry)
         if -2 <= accidental <= 2:
             octave = None if root.octave is None else root.octave + octave_carry
-            return Note(letter, accidental, octave)
+            result = Note(letter, accidental, octave)
+            if result.midi is not None and not 0 <= result.midi <= 127:
+                raise ValueError(
+                    f"{root.name} transposed by {semitones} semitones falls outside the MIDI range 0-127"
+                )
+            return result
     flats = prefers_flats(root)
     if root.octave is None:
         return spell_pitch_class((root.pitch_class + semitones) % 12, flats)
@@ -157,6 +162,66 @@ def transpose(root: Note, semitones: int, letter_steps: int | None = None) -> No
             f"{root.name} transposed by {semitones} semitones falls outside the MIDI range 0-127"
         )
     return note_from_midi(midi, flats)
+
+
+_INTERVAL_REF = (0, 2, 4, 5, 7, 9, 11, 12)  # unison .. octave, in semitones
+
+
+def transpose_all(notes: list[Note], semitones: int) -> list[Note]:
+    """Transpose a whole note list by one *spelled* interval, so it stays in one key.
+
+    Every note moves by the same number of letters (F A C up a semitone is
+    Gb Bb Db, not Gb A# C#). The interval is a perfect, major, minor or singly
+    augmented/diminished one; among those the spelling with the fewest
+    accidentals over the whole list wins, plain intervals (minor 2nd over
+    augmented unison) on ties. A unison or octave never respells a note.
+    Out-of-MIDI-range results raise.
+    """
+    octs, rem = divmod(semitones, 12)
+    best = None
+    for letters, ref in enumerate(_INTERVAL_REF):
+        diff = rem - ref
+        if abs(diff) > 1 or (rem == 0 and letters != 0):
+            continue
+        perfect = letters in (0, 3, 4, 7)
+        if perfect and diff == -1 and letters == 0:
+            continue  # a 'diminished unison' is not an interval to transpose by
+        plain = diff == 0 or (diff == -1 and not perfect)
+        try:
+            moved = [transpose(n, semitones, letters + 7 * octs) for n in notes]
+        except ValueError:
+            continue
+        if any(abs(m.accidental) > 2 or m.letter != LETTERS[(LETTERS.index(n.letter) + letters) % 7]
+               for m, n in zip(moved, notes)):
+            continue  # this letter distance needs triple accidentals somewhere
+        key = (sum(abs(m.accidental) for m in moved), not plain, letters)
+        if best is None or key < best[0]:
+            best = (key, moved)
+    if best is None:
+        return [transpose(n, semitones) for n in notes]
+    return best[1]
+
+
+def best_spelling(pc: int, spell_from, known: dict[int, Note]) -> Note:
+    """Spell a pitch class that the caller did not write, to agree with what they did.
+
+    `spell_from(note)` builds the notes derived from a candidate spelling (a
+    chord or scale on that root); the candidate whose notes reuse the most of the
+    caller's own spellings (`known`, pitch class -> Note) wins, then the one with
+    fewer accidentals. So D F gives a Bb chord (Bb D F), not A# (A# C## E#).
+    """
+    if pc in known:
+        return known[pc]
+    # every spelling with at most one accidental: pc 11 is B or Cb, pc 5 is F or E#
+    candidates = [Note(letter, acc) for letter in LETTERS for acc in (0, -1, 1)
+                  if (LETTER_PCS[letter] + acc) % 12 == pc]
+
+    def score(cand):
+        notes = spell_from(cand)
+        agree = sum(1 for n in notes if known.get(n.pitch_class) == n.without_octave())
+        return (-agree, sum(abs(n.accidental) for n in notes))
+
+    return min(candidates, key=score)
 
 
 def spelling_for_pcs(parsed: list[Note]) -> dict[int, Note]:

@@ -16,6 +16,7 @@ from .forms import resolve_form as _resolve_form
 from .midi_io import (
     _build_file,
     _channel_allocator,
+    _check_range,
     _common_meta,
     _write_file,
     build_track_events,
@@ -31,10 +32,16 @@ _DEFAULT_BARS = {
 
 def _bars_for(label: str, bars, default: int) -> int:
     if isinstance(bars, dict):
-        if label in bars:
-            return int(bars[label])
-        return int(_DEFAULT_BARS.get(label.lower(), default))
-    return int(bars)
+        value = bars[label] if label in bars else _DEFAULT_BARS.get(label.lower(), default)
+    else:
+        value = bars
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if isinstance(value, str) and value.strip().isdigit():  # MCP clients may send "8"
+        value = int(value.strip())
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError(f"section {label!r} bars must be a positive whole number, got {value!r}")
+    return value
 
 
 def plan_sections(form, bars=8, beats_per_bar: int = 4, tempo: int | None = None) -> dict:
@@ -50,13 +57,14 @@ def plan_sections(form, bars=8, beats_per_bar: int = 4, tempo: int | None = None
     """
     if not isinstance(beats_per_bar, int) or isinstance(beats_per_bar, bool) or not 1 <= beats_per_bar <= 32:
         raise ValueError(f"beats_per_bar must be an integer between 1 and 32, got {beats_per_bar!r}")
-    labels = _resolve_form(form)
+    if tempo is not None:
+        _check_range("tempo", tempo, 10, 400)
+    known = set(_DEFAULT_BARS) | (set(bars) if isinstance(bars, dict) else set())
+    labels = _resolve_form(form, known=known)
     sections = []
     bar_cursor = 0
     for i, label in enumerate(labels):
         n_bars = _bars_for(label, bars, 8)
-        if n_bars < 1:
-            raise ValueError(f"section {label!r} must be at least 1 bar")
         entry = {
             "index": i,
             "section": label,
@@ -93,14 +101,22 @@ def render_song_structure(sections, form=None, tempo: int = 120, beats_per_bar: 
     letters); omitted, the sections play once in given order. Sections are laid
     end to end; tracks with the same `name` across sections become one
     continuous MIDI track (so the "bass" line is one track for the whole song),
-    and a name present in only some sections simply rests elsewhere.
+    and a name present in only some sections simply rests elsewhere. If a later
+    section gives that track another `program`, a program change is written at
+    the section start (the verse's piano becomes the bridge's strings). Unnamed
+    tracks are named by type ('notes', or 'notes_1', 'notes_2' when a section has
+    several), so separate parts never merge. A name cannot be drums in one section
+    and pitched in another. An explicit `channel` is honoured (drums always use
+    channel 10). The file's time signature follows `beats_per_bar`.
     """
     if not isinstance(sections, dict) or not sections:
         raise ValueError("sections must be a non-empty mapping of section name to {bars, tracks}")
     if not isinstance(beats_per_bar, int) or isinstance(beats_per_bar, bool) or not 1 <= beats_per_bar <= 32:
         raise ValueError(f"beats_per_bar must be an integer between 1 and 32, got {beats_per_bar!r}")
+    _check_range("tempo", tempo, 10, 400, integer=True)
+    _check_range("step_beats", step_beats, 0.0625, 16)
 
-    order = _resolve_form(form) if form is not None else list(sections)
+    order = _resolve_form(form, known=sections) if form is not None else list(sections)
     for label in order:
         if label not in sections:
             raise ValueError(
@@ -110,6 +126,34 @@ def render_song_structure(sections, form=None, tempo: int = 120, beats_per_bar: 
 
     bpb = beats_per_bar
 
+    explicit = {t.get("name") for spec in sections.values() if isinstance(spec, dict)
+                for t in (spec.get("tracks") or []) if isinstance(t, dict) and t.get("name")}
+
+    def default_names(tracks) -> list:
+        """Unnamed tracks are named by type — 'notes', or 'notes_1', 'notes_2' when a section
+        has several — skipping names the caller uses, so separate parts never merge."""
+        counts: dict[str, int] = {}
+        for t in tracks:
+            if isinstance(t, dict) and not t.get("name"):
+                counts[t.get("type")] = counts.get(t.get("type"), 0) + 1
+        taken = set(explicit)
+        names = []
+        for t in tracks:
+            if not isinstance(t, dict) or t.get("name"):
+                names.append(None)
+                continue
+            ttype = str(t.get("type"))
+            if counts[t.get("type")] == 1 and ttype not in taken:
+                name = ttype
+            else:
+                k = 1
+                while f"{ttype}_{k}" in taken:
+                    k += 1
+                name = f"{ttype}_{k}"
+            taken.add(name)
+            names.append(name)
+        return names
+
     # Build each distinct section once (events relative to its own start).
     built_sections: dict[str, dict] = {}
     for label, spec in sections.items():
@@ -118,7 +162,15 @@ def render_song_structure(sections, form=None, tempo: int = 120, beats_per_bar: 
         tracks = spec["tracks"]
         if not isinstance(tracks, (list, tuple)) or not tracks:
             raise ValueError(f"section {label!r} has no tracks")
-        built = [build_track_events(t, i, step_beats, bpb) for i, t in enumerate(tracks)]
+        built = []
+        for i, (t, default) in enumerate(zip(tracks, default_names(tracks))):
+            b = build_track_events(t, i, step_beats, bpb)
+            if default:
+                b["name"] = default
+            b["channel"] = t.get("channel")
+            if b["channel"] is not None and not b["is_drums"]:
+                _check_range(f"section {label!r} track {i} channel", b["channel"], 0, 15, integer=True)
+            built.append(b)
         content = max((b["rel_end"] for b in built), default=0.0)
         declared = spec.get("bars")
         if declared is not None:
@@ -127,12 +179,16 @@ def render_song_structure(sections, form=None, tempo: int = 120, beats_per_bar: 
             length = max(content, declared * bpb)
         else:
             length = content
-        length = max(bpb, math.ceil(length / bpb) * bpb)  # round up to whole bars
+        # round up to whole bars, ignoring float noise (0.4 + 58 * 0.2 is 12 beats, not 12.000...02)
+        length = max(bpb, math.ceil(round(length / bpb, 6)) * bpb)
         built_sections[label] = {"built": built, "length": length, "bars": int(length // bpb)}
 
-    # Sequence sections, accumulating events per track name.
+    # Sequence sections, accumulating events per track name. A name keeps one MIDI
+    # track; if a later section plays it with another program, a program change is
+    # written at that section's start.
     name_events: dict[str, list] = {}
-    name_meta: dict[str, tuple] = {}  # name -> (program, is_drums)
+    name_meta: dict[str, dict] = {}  # name -> first program, drums flag, explicit channel
+    name_program: dict[str, int] = {}  # the program currently sounding on that track
     name_order: list[str] = []
     timeline = []
     offset = 0.0
@@ -142,8 +198,17 @@ def render_song_structure(sections, form=None, tempo: int = 120, beats_per_bar: 
         for b in sec["built"]:
             tname = b["name"]
             if tname not in name_meta:
-                name_meta[tname] = (b["program"], b["is_drums"])
+                name_meta[tname] = {"program": b["program"], "is_drums": b["is_drums"], "channel": b["channel"]}
+                name_program[tname] = b["program"]
                 name_order.append(tname)
+            elif name_meta[tname]["is_drums"] != b["is_drums"]:
+                raise ValueError(
+                    f"track {tname!r} is a drums track in one section and a pitched track in another;"
+                    f" give them different names"
+                )
+            elif not b["is_drums"] and b["program"] != name_program[tname]:
+                name_events[tname].append({"start": b["start"] + offset, "program": b["program"]})
+                name_program[tname] = b["program"]
             shifted = [dict(e, start=e["start"] + offset) for e in b["events"]]
             name_events.setdefault(tname, []).extend(shifted)
         timeline.append({
@@ -157,24 +222,36 @@ def render_song_structure(sections, form=None, tempo: int = 120, beats_per_bar: 
         offset += sec["length"]
         bar_cursor += sec["bars"]
 
-    # Assign one channel per track name (drums share the percussion channel).
-    channels = _channel_allocator()
+    # One channel per track name: drums share the percussion channel, explicit channels
+    # are honoured (first occurrence wins), the rest are allocated around them.
+    reserved = {m["channel"] for m in name_meta.values() if m["channel"] is not None and not m["is_drums"]}
+    channels = _channel_allocator(reserved)
     parts = []
     track_summary = []
     for tname in name_order:
-        program, is_drums = name_meta[tname]
-        channel = DRUM_CHANNEL if is_drums else next(channels)
+        meta = name_meta[tname]
+        program, is_drums = meta["program"], meta["is_drums"]
+        if is_drums:
+            channel = DRUM_CHANNEL
+        elif meta["channel"] is not None:
+            channel = meta["channel"]
+        else:
+            channel = next(channels)
         events = name_events[tname]
         parts.append({"events": events, "channel": channel, "program": program, "name": tname})
-        track_summary.append({
+        summary = {
             "name": tname,
             "channel": channel,
             "program": program,
             "is_drums": is_drums,
-            "event_count": len(events),
-        })
+            "event_count": sum(1 for e in events if "program" not in e),
+        }
+        changes = [e["program"] for e in events if "program" in e]
+        if changes:
+            summary["program_changes"] = changes
+        track_summary.append(summary)
 
-    mid = _build_file(parts, tempo)
+    mid = _build_file(parts, tempo, bpb, total_beats=offset)
     result = _write_file(mid, file_name, output_dir, "song")
     result.update(_common_meta(tempo, offset))
     result["form"] = order

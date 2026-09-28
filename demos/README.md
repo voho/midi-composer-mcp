@@ -31,7 +31,7 @@ here to keep the repo light — run the generator to render their audio).
 
 > *"Take a ii-V-I turnaround in C and make it jazzier — add secondary dominants and a tritone substitution, then comp it with smooth voicings and a walking bass."*
 
-**Showcases:** `secondary_dominant`, `tritone_substitute`, `analyze_progression` (Roman numerals), `voice_leading` comping, and a root-fifth walking bass with a voice-led guide-tone head.
+**Showcases:** `secondary_dominant`, `tritone_substitute`, `analyze_progression` (the generator prints the Roman numerals; the secondary dominants A7, E7, D7 and the tritone sub Db7 are the non-diatonic chords), `voice_leading` comping, and a root-fifth walking bass with a voice-led guide-tone head.
 🎵 [03_jazz_reharm.mid](03_jazz_reharm.mid) · 🔊 [.wav](03_jazz_reharm.wav)
 
 ### 4. Counterpoint — all five species
@@ -45,7 +45,7 @@ here to keep the repo light — run the generator to render their audio).
 
 > *"Give me a flamenco piece in E Phrygian dominant — an improvised-sounding guitar line over a rumba clave with hand percussion."*
 
-**Showcases:** the exotic Phrygian-dominant scale, a `melodic_walk` line (seeded), the `groove("rumba_clave_32")` preset, and named drum lanes (clave, conga, palmas).
+**Showcases:** the exotic Phrygian-dominant scale, a `melodic_walk` line (seeded), the `groove("rumba_clave_32")` preset, and named drum lanes (clave, conga, and `clap` for the palmas).
 🎵 [05_flamenco.mid](05_flamenco.mid) · 🔊 [.wav](05_flamenco.wav)
 
 ### 6. Negative harmony — before / after

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 
-from .chords import ChordType, identify_chord_quality
+from .chords import ChordType, identify_chord_quality, match_chords
 from .notes import Note, parse_notes, transpose
 from .scales import MAJOR_DEGREES, degree_labels, resolve_scale_type, scale_notes
 
@@ -29,16 +29,34 @@ _ROMAN_QUALITY = {
 }
 
 
+def roman_suffix(quality: ChordType | None, minor_numeral: bool) -> str:
+    """How a chord quality is written after a roman numeral ('7', 'ø7', '+', 'sus4'...).
+
+    Qualities without a classic figure fall back to their symbol suffix. A bare
+    '6' is written 'add6' so it cannot be misread as a first-inversion figure,
+    and a lowercase numeral drops a redundant leading 'm' ('ii9', not 'iim9').
+    """
+    if quality is None:
+        return "?"
+    if quality.name in _ROMAN_QUALITY:
+        return _ROMAN_QUALITY[quality.name]
+    suffix = quality.symbol
+    if suffix == "6":
+        return "add6"
+    if minor_numeral and suffix.startswith("m") and not suffix.startswith(("maj", "m6")):
+        suffix = suffix[1:]
+    return suffix
+
+
 def _roman_numeral(index: int, intervals: tuple[int, ...], quality: ChordType | None,
                    relative_pcs: frozenset[int]) -> str:
     diff = intervals[index] - MAJOR_DEGREES[index]
     prefix = "#" * diff if diff > 0 else "b" * -diff
     numeral = _ROMAN_BASE[index]
-    minor_third = 3 in relative_pcs
+    minor_third = 3 in relative_pcs and 4 not in relative_pcs
     if minor_third:
         numeral = numeral.lower()
-    suffix = _ROMAN_QUALITY.get(quality.name, "?") if quality else "?"
-    return f"{prefix}{numeral}{suffix}"
+    return f"{prefix}{numeral}{roman_suffix(quality, minor_third)}"
 
 
 def _stacked_chord(scale_intervals: tuple[int, ...], labels: list[str],
@@ -61,10 +79,24 @@ def _stacked_chord(scale_intervals: tuple[int, ...], labels: list[str],
         "degree": index + 1,
         "root": chord_root.name,
         "chord_type": quality.name if quality else "unknown",
-        "symbol": f"{chord_root.pitch_class_name}{quality.symbol}" if quality else f"{chord_root.pitch_class_name}?",
+        "symbol": f"{chord_root.pitch_class_name}{quality.symbol}" if quality else None,
         "notes": [t.name for t in tones],
         "intervals_from_chord_root": [s - base for s in semitones],
     }
+    if quality is None:
+        # Not a stacked-thirds chord type (common in pentatonic and exotic scales):
+        # name it as an inversion if it is one (C E A = Am/C), otherwise hand back the
+        # note list itself — either way `symbol` feeds chords_to_midi and friends.
+        found = match_chords([t.name for t in tones], include_partial=False, limit=1)["matches"]
+        if found:
+            entry["symbol"] = found[0]["symbol"]
+            entry["chord_type"] = found[0]["chord_type"]
+            entry["root"] = found[0]["root"]      # the chord's real root ...
+            entry["bass"] = chord_root.name       # ... over the scale degree it was stacked on
+            if "inversion" in found[0]:
+                entry["inversion"] = found[0]["inversion"]
+        else:
+            entry["symbol"] = [t.pitch_class_name for t in tones]
     if chord_root.octave is not None:
         entry["midi"] = [t.midi for t in tones]
     if n == 7:
@@ -86,7 +118,7 @@ def diatonic_chords(root: str, scale_type: str, sevenths: bool = False) -> dict:
     """
     scale = resolve_scale_type(scale_type)
     root_note = parse_notes(root)[0]
-    labels = degree_labels(scale.intervals)
+    labels = degree_labels(scale)
     degrees = scale_notes(scale, root_note)[:-1]
     tone_count = 4 if sevenths else 3
 
@@ -103,21 +135,29 @@ def diatonic_chords(root: str, scale_type: str, sevenths: bool = False) -> dict:
     }
 
 
-def _parse_degree(token: int | str, count: int) -> int:
-    """Parse a scale degree given as 1-based int, '5', 'V', 'vi' or 'vii°'."""
+# What may follow a roman numeral: the figures diatonic_chords/analyze_progression
+# write (°, ø7, +, Δ7, 7, sus4, add6, ?...). They are ignored — `sevenths` decides.
+_NUMERAL_SUFFIX = r"(?:[°øo+Δ?]|maj|add|sus|dim|aug|m|b|#|\d)*"
+
+
+def _parse_degree(token: int | str, intervals: tuple[int, ...]) -> int:
+    """Parse a scale degree given as 1-based int, '5', 'V', 'vi', 'vii°' or 'bVII'.
+
+    An accidental prefix is accepted when it names the scale's own degree, so the
+    numerals diatonic_chords prints round-trip (bIII, bVI, bVII in natural minor,
+    #iv° in lydian); a prefix that alters the scale ('bVII' in major) is rejected.
+    """
+    count = len(intervals)
     if isinstance(token, bool):
         raise ValueError(f"Invalid scale degree: {token!r}")
     if isinstance(token, int):
         degree = token
     elif isinstance(token, str):
         text = token.strip()
-        if re.match(r"^[#b]", text):
-            raise ValueError(
-                f"Chromatic alterations are not supported in degree sequences: {token!r}."
-                f" Degrees are positions in the chosen scale (1-{count})."
-            )
-        m = re.match(r"^(\d+|[ivIV]+)[°ø+Δ7oO]*$", text)
-        core = m.group(1) if m else ""
+        m = re.match(rf"^([#b]*)(\d+|[ivIV]+){_NUMERAL_SUFFIX}$", text)
+        if not m:
+            raise ValueError(f"Invalid scale degree: {token!r}. Use 1-{count} or roman numerals I-VII.")
+        prefix, core = m.group(1), m.group(2)
         if core.isdigit():
             degree = int(core)
         else:
@@ -125,6 +165,15 @@ def _parse_degree(token: int | str, count: int) -> int:
             if degree == 0:
                 raise ValueError(
                     f"Invalid scale degree: {token!r}. Use 1-{count} or roman numerals I-VII."
+                )
+        if prefix:
+            alteration = prefix.count("#") - prefix.count("b")
+            if not (count == 7 and 1 <= degree <= 7
+                    and MAJOR_DEGREES[degree - 1] + alteration == intervals[degree - 1]):
+                raise ValueError(
+                    f"Chromatic alterations are not supported in degree sequences: {token!r}."
+                    f" Degrees are positions in the chosen scale (1-{count}); an accidental is"
+                    f" only accepted when it names the scale's own degree (bVI in natural minor)."
                 )
     else:
         raise ValueError(f"Invalid scale degree: {token!r} (use an integer or a roman numeral)")
@@ -140,11 +189,14 @@ def degrees_to_chords(root: str, scale_type: str, degrees, sevenths: bool = Fals
     that the scale defines there.
     """
     scale = resolve_scale_type(scale_type)
-    if isinstance(degrees, (int, str)):
-        degrees = [t for t in re.split(r"[,\s\-]+", str(degrees).strip()) if t]
+    if isinstance(degrees, (int, str)) and not isinstance(degrees, bool):
+        # separators: commas, spaces, and dashes *between* tokens ('1-5-6-4', 'ii–V–I');
+        # a leading '-' stays on the number so '-1' is rejected, not read as 1
+        tokens = re.split(r"[,\s]+|(?<=\S)[-–—](?=\S)|[–—]", str(degrees).strip())
+        degrees = [t for t in tokens if t and not re.fullmatch(r"[-–—]+", t)]  # 'I - V - vi - IV'
     if not isinstance(degrees, (list, tuple)) or not degrees:
         raise ValueError("degrees must be a non-empty list like [1, 5, 6, 4] or 'I V vi IV'")
-    indices = [_parse_degree(t, len(scale.intervals)) for t in degrees]
+    indices = [_parse_degree(t, scale.intervals) for t in degrees]
 
     base = diatonic_chords(root, scale_type, sevenths)
     by_degree = {c["degree"]: c for c in base["chords"]}

@@ -13,6 +13,8 @@ import base64
 import datetime
 import os
 import re
+import tempfile
+import unicodedata
 
 from mido import Message, MetaMessage, MidiFile, MidiTrack, bpm2tempo
 
@@ -95,15 +97,21 @@ def assign_octaves(notes: list[Note], default_octave: int, policy: str) -> list[
     """
     if policy not in OCTAVE_POLICIES:
         raise ValueError(f"octave_policy must be one of {OCTAVE_POLICIES}, got {policy!r}")
+    # 'nearest' follows the melody, but stays within two octaves of its anchor
+    # (the first note, or the latest note written with an octave), so a repeating
+    # progression cannot drift out of range while ordinary lines are left alone.
+    anchor: int | None = None
     placed: list[Note] = []
     prev: int | None = None
     for n in notes:
         if n.octave is not None:
             midi = n.midi
             result = n
+            anchor = midi
         else:
             if prev is None:
-                midi = n.pitch_class + (default_octave + 1) * 12
+                midi = Note(n.letter, n.accidental, default_octave).midi  # Cb at octave 4 is Cb4
+                anchor = midi
             else:
                 above = prev + ((n.pitch_class - prev) % 12)
                 if policy == "ascending":
@@ -111,6 +119,9 @@ def assign_octaves(notes: list[Note], default_octave: int, policy: str) -> list[
                 else:
                     below = above - 12
                     midi = above if above - prev <= prev - below else below
+                    if abs(midi - anchor) > 24 or not 0 <= midi <= 127:
+                        options = [m for m in (above, below) if 0 <= m <= 127] or [midi]
+                        midi = min(options, key=lambda m: (abs(m - anchor), m))
             result = _with_octave(n, midi)
         placed.append(_check_midi(result))
         prev = midi
@@ -122,17 +133,20 @@ def voice_chord(tones: list[Note], octave: int, bass: Note | None = None) -> lis
 
     The first octave-less tone lands at `octave`; each following tone goes to
     the nearest pitch strictly above the previous one. A slash bass without
-    an octave is placed strictly below the lowest chord tone.
+    an octave is placed strictly below the lowest chord tone; a slash bass with
+    an octave ('C/E3') stays put and the chord is stacked above it.
     """
     voiced: list[Note] = []
     prev: int | None = None
+    if bass is not None and bass.octave is not None and tones and tones[0].octave is None:
+        prev = bass.midi  # stack the chord strictly above the given bass
     for t in tones:
         if t.octave is not None:
             midi = t.midi
             voiced.append(t)
         else:
             if prev is None:
-                midi = t.pitch_class + (octave + 1) * 12
+                midi = Note(t.letter, t.accidental, octave).midi  # by letter: Cb at 4 is Cb4
             else:
                 midi = prev + ((t.pitch_class - prev) % 12 or 12)
             voiced.append(_with_octave(t, midi))
@@ -275,19 +289,42 @@ def _drum_events(lanes, step_beats: float, velocity: int, accent_velocity: int,
 
 # ------------------------------------------------------------- file writing
 
+def _meta_text(text: str) -> str:
+    """Make a track name storable in a MIDI meta event (Latin-1): 'Smyčce' -> 'Smycce'."""
+    out = []
+    for ch in text:
+        try:
+            ch.encode("latin-1")
+            out.append(ch)
+        except UnicodeEncodeError:
+            base = "".join(c for c in unicodedata.normalize("NFKD", ch) if c.isascii())
+            out.append(base or "?")
+    return "".join(out)
+
+
 def _events_to_track(events: list[dict], channel: int, program: int,
                      name: str | None = None) -> MidiTrack:
+    """Timed note (and optional program-change) events -> one MIDI track.
+
+    A note event is {"midi", "start", "duration", "velocity"}; a program-change
+    event is {"start", "program"} (used when a stitched song part changes
+    instrument between sections). At one tick: note-offs, then program changes,
+    then note-ons.
+    """
     timed: list[tuple[int, int, Message]] = []
     for e in events:
         on_tick = round(e["start"] * TICKS_PER_BEAT)
+        if "program" in e:
+            timed.append((on_tick, 1, Message("program_change", program=e["program"], channel=channel)))
+            continue
         off_tick = max(on_tick + 1, round((e["start"] + e["duration"]) * TICKS_PER_BEAT))
-        timed.append((on_tick, 1, Message("note_on", note=e["midi"], velocity=e["velocity"], channel=channel)))
+        timed.append((on_tick, 2, Message("note_on", note=e["midi"], velocity=e["velocity"], channel=channel)))
         timed.append((off_tick, 0, Message("note_off", note=e["midi"], velocity=0, channel=channel)))
     timed.sort(key=lambda t: (t[0], t[1]))
 
     track = MidiTrack()
     if name:
-        track.append(MetaMessage("track_name", name=name, time=0))
+        track.append(MetaMessage("track_name", name=_meta_text(name), time=0))
     track.append(Message("program_change", program=program, channel=channel, time=0))
     now = 0
     for tick, _, msg in timed:
@@ -298,12 +335,15 @@ def _events_to_track(events: list[dict], channel: int, program: int,
     return track
 
 
-def _build_file(parts: list[dict], tempo: int) -> MidiFile:
+def _build_file(parts: list[dict], tempo: int, beats_per_bar: int = 4,
+                total_beats: float = 0.0) -> MidiFile:
     mid = MidiFile(ticks_per_beat=TICKS_PER_BEAT)
     conductor = MidiTrack()
     conductor.append(MetaMessage("set_tempo", tempo=bpm2tempo(tempo), time=0))
-    conductor.append(MetaMessage("time_signature", numerator=4, denominator=4, time=0))
-    conductor.append(MetaMessage("end_of_track", time=0))
+    conductor.append(MetaMessage("time_signature", numerator=beats_per_bar, denominator=4, time=0))
+    # the conductor track lasts the full reported length, so trailing rests (a groove
+    # ending in rests, a section's empty last bars) are part of the file
+    conductor.append(MetaMessage("end_of_track", time=max(0, round(total_beats * TICKS_PER_BEAT))))
     mid.tracks.append(conductor)
     for part in parts:
         mid.tracks.append(_events_to_track(part["events"], part["channel"],
@@ -329,7 +369,18 @@ def _write_file(mid: MidiFile, file_name: str | None, output_dir: str | None,
     os.makedirs(directory, exist_ok=True)
     name = _safe_file_name(file_name, default_stem)
     path = os.path.abspath(os.path.join(directory, name))
-    mid.save(path)
+    # write to a temporary file first, so a failed save never leaves a corrupt .mid behind
+    fd, tmp = tempfile.mkstemp(suffix=".mid", dir=os.path.dirname(path))
+    os.close(fd)
+    umask = os.umask(0)
+    os.umask(umask)
+    os.chmod(tmp, 0o666 & ~umask)  # mkstemp creates 0600; give the file normal permissions
+    try:
+        mid.save(tmp)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
     with open(path, "rb") as fh:
         data = fh.read()
     return {
@@ -381,7 +432,8 @@ def render_notes(notes, rhythm: str | None = None, step_beats: float = 0.5,
     placed = assign_octaves(parsed, octave, octave_policy)
     events, total_beats = _melody_events(placed, rhythm, step_beats,
                                          velocity, accent_velocity, sustain)
-    mid = _build_file([{"events": events, "channel": 0, "program": program, "name": "notes"}], tempo)
+    mid = _build_file([{"events": events, "channel": 0, "program": program, "name": "notes"}], tempo,
+                      total_beats=total_beats)
     result = _write_file(mid, file_name, output_dir, "notes")
     result.update(_common_meta(tempo, total_beats))
     result["note_count"] = len(events)
@@ -403,7 +455,8 @@ def render_chords(chords, beats_per_chord: float = 4.0, tempo: int = 120,
 
     events, resolved, total_beats = _chord_events(parsed_chords, beats_per_chord,
                                                   octave, arpeggiate, velocity)
-    mid = _build_file([{"events": events, "channel": 0, "program": program, "name": "chords"}], tempo)
+    mid = _build_file([{"events": events, "channel": 0, "program": program, "name": "chords"}], tempo,
+                      total_beats=total_beats)
     result = _write_file(mid, file_name, output_dir, "chords")
     result.update(_common_meta(tempo, total_beats))
     result["chord_count"] = len(resolved)
@@ -421,7 +474,8 @@ def render_drums(lanes, step_beats: float = 0.5, tempo: int = 120, velocity: int
     _check_range("accent_velocity", accent_velocity, 1, 127, integer=True)
 
     events, resolved, total_beats = _drum_events(lanes, step_beats, velocity, accent_velocity)
-    mid = _build_file([{"events": events, "channel": DRUM_CHANNEL, "program": 0, "name": "drums"}], tempo)
+    mid = _build_file([{"events": events, "channel": DRUM_CHANNEL, "program": 0, "name": "drums"}], tempo,
+                      total_beats=total_beats)
     result = _write_file(mid, file_name, output_dir, "drums")
     result.update(_common_meta(tempo, total_beats))
     result["hit_count"] = len(events)
@@ -464,6 +518,7 @@ def render_song(melody_notes, chords, melody_rhythm: str | None = None,
             {"events": chord_events, "channel": 1, "program": chord_program, "name": "chords"},
         ],
         tempo,
+        total_beats=max(melody_beats, chord_beats),
     )
     result = _write_file(mid, file_name, output_dir, "song")
     result.update(_common_meta(tempo, max(melody_beats, chord_beats)))
@@ -476,11 +531,15 @@ def render_song(melody_notes, chords, melody_rhythm: str | None = None,
 
 # ------------------------------------------------------ multi-track arrange
 
-def _channel_allocator():
-    """Yield channels 0,1,...,8,10,...,15 (skipping the drum channel)."""
+def _channel_allocator(reserved=()):
+    """Yield channels 0,1,...,8,10,...,15, skipping the drum channel and any `reserved` ones."""
     for ch in range(16):
-        if ch != DRUM_CHANNEL:
+        if ch != DRUM_CHANNEL and ch not in reserved:
             yield ch
+    raise ValueError(
+        "Too many melodic tracks: MIDI has 15 melodic channels (channel 10 is reserved for"
+        " drums). Merge some parts, or give tracks that share an instrument the same channel."
+    )
 
 
 def build_track_events(track: dict, index: int, step_beats: float,
@@ -500,6 +559,8 @@ def build_track_events(track: dict, index: int, step_beats: float,
             f"track {index} has invalid type {ttype!r}; use 'notes', 'chords' or 'drums'"
         )
     name = track.get("name") or ttype
+    if not isinstance(name, str):
+        raise ValueError(f"track {index} name must be a string, got {name!r}")
     rel_start = track.get("start_beat", 0.0)
     _check_range(f"track {index} start_beat", rel_start, 0, 100000)
     start = base_start + rel_start
@@ -553,8 +614,10 @@ def _build_track(track: dict, index: int, step_beats: float, beats_per_chord: fl
                  channels) -> dict:
     b = build_track_events(track, index, step_beats, beats_per_chord)
     explicit_channel = track.get("channel")
-    if explicit_channel is None:
-        channel = DRUM_CHANNEL if b["is_drums"] else next(channels)
+    if b["is_drums"]:
+        channel = DRUM_CHANNEL  # General MIDI percussion always lives on channel 10
+    elif explicit_channel is None:
+        channel = next(channels)
     else:
         channel = explicit_channel
         _check_range(f"track {index} channel", channel, 0, 15, integer=True)
@@ -588,7 +651,8 @@ def render_arrangement(tracks, tempo: int = 120, file_name: str | None = None,
     - drums:  {"type": "drums", "lanes": {"kick": "O...", "snare": "..O.", "hat": "oooo"}}
 
     Shared per-track options: `name`, `velocity`, `start_beat` (beat offset),
-    `step_beats`, `channel` (auto-assigned, drums forced to channel 10).
+    `step_beats`, `channel` (auto-assigned around explicitly chosen ones; drums
+    are always on channel 10).
     """
     if not isinstance(tracks, (list, tuple)) or not tracks:
         raise ValueError("tracks must be a non-empty list of track objects")
@@ -596,17 +660,22 @@ def render_arrangement(tracks, tempo: int = 120, file_name: str | None = None,
     _check_range("step_beats", step_beats, 0.0625, 16)
     _check_range("beats_per_chord", beats_per_chord, 0.25, 64)
 
-    channels = _channel_allocator()
+    # auto-assigned channels steer clear of the ones tracks claim explicitly
+    reserved = {t.get("channel") for t in tracks
+                if isinstance(t, dict) and t.get("type") != "drums"
+                and isinstance(t.get("channel"), int) and not isinstance(t.get("channel"), bool)}
+    channels = _channel_allocator(reserved)
     built = [_build_track(t, i, step_beats, beats_per_chord, channels)
              for i, t in enumerate(tracks)]
 
+    total_beats = max((b["end_beat"] for b in built), default=0.0)
     mid = _build_file(
         [{"events": b["events"], "channel": b["channel"],
           "program": b["program"], "name": b["name"]} for b in built],
         tempo,
+        total_beats=total_beats,
     )
     result = _write_file(mid, file_name, output_dir, "arrangement")
-    total_beats = max((b["end_beat"] for b in built), default=0.0)
     result.update(_common_meta(tempo, total_beats))
     result["track_count"] = len(built)
     result["tracks"] = [b["summary"] for b in built]

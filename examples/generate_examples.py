@@ -161,8 +161,8 @@ def tintinnabuli_song(out_dir: str) -> dict:
     sections = {
         "verse": {"bars": 4, "tracks": [
             {"type": "chords", "name": "pads", "chords": verse_pads, "beats_per_chord": 4, "program": 89, "velocity": 55},
-            {"type": "notes", "name": "M-voice", "notes": m_voice, "step_beats": 2.0, "octave": 5, "program": 48, "sustain": True},
-            {"type": "notes", "name": "T-voice", "notes": t_voice, "step_beats": 2.0, "octave": 4, "program": 9, "velocity": 60, "sustain": True},
+            {"type": "notes", "name": "M-voice", "notes": m_voice, "step_beats": 1.0, "octave": 5, "program": 48, "sustain": True},
+            {"type": "notes", "name": "T-voice", "notes": t_voice, "step_beats": 1.0, "octave": 4, "program": 9, "velocity": 60, "sustain": True},
         ]},
         "chorus": {"bars": 4, "tracks": [
             {"type": "chords", "name": "pads", "chords": chorus_pads, "beats_per_chord": 4, "program": 89, "velocity": 64},

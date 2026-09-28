@@ -43,7 +43,8 @@ decides *which* rules to invoke and *how* to combine them to serve the goal.
 
 3. **Randomness is clearly marked and contained in separate tools.**
    The only stochastic tools are the ones named for it — `random_notes`,
-   `random_rhythm` — and the explicitly stochastic `arpeggiate(style="random")`.
+   `random_rhythm`, the seeded random walk `melodic_walk` — and the explicitly
+   stochastic `arpeggiate(style="random")`.
    They always accept a `seed` and always return the seed used, so any result is
    reproducible. Everything else is deterministic. Do not sprinkle randomness
    into rule tools; if a new generator needs chance, make it a separate,
@@ -72,6 +73,7 @@ src/midi_composer_mcp/
   chords.py       # chord database (35+), symbols, generation, matching
   diatonic.py     # chords per scale degree, degree-sequence resolution
   circle.py       # circle of fifths: key signatures and related keys
+  forms.py        # form strings ('AABA', 'intro verse chorus') -> ordered labels
   harmony.py      # intervals, roman-numeral analysis, voice leading, reharmonization
   melody.py       # degrees, arpeggios, walks, motif grammar, sequence, snap, tintinnabuli
   counterpoint.py # species counterpoint 1-5 (deterministic, rule-following)
@@ -88,8 +90,15 @@ src/midi_composer_mcp/
   does, the input/output shapes, and one concrete example.
 - Deterministic, or clearly seeded (principle 3).
 - Take and return the shared vocabulary (principle 2).
-- Validate inputs and raise clear `ValueError`s.
-- Add tests (`tests/`), and update `README.md` tables **and** examples.
+- Validate inputs and raise clear `ValueError`s (never a TypeError/KeyError/
+  StopIteration — `tests/test_invariants.py` fuzzes every MCP tool for this).
+- Spell properly and keep pitches: a respelled note keeps its MIDI pitch, and a
+  note the caller did not write is spelled to agree with the ones they did.
+- Key-relative tools must behave identically in all 12 keys; judge intervals by
+  letters + semitones, not semitones alone.
+- Add tests (`tests/`) — a unit test **and** the relevant property sweep in
+  `tests/test_invariants.py` (all keys, every chord type, chaining) — and
+  update `README.md` tables **and** examples.
 
 ## Development
 

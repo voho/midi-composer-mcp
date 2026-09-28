@@ -4,7 +4,7 @@ An [MCP](https://modelcontextprotocol.io) server that gives an LLM a **large pal
 
 The guiding split: **the tools contain the rules, the LLM contains the creativity.** Every tool is a small, deterministic step — scales and chords, diatonic harmony, intervals, voice leading, reharmonization, the circle of fifths, motif grammars, sequences, tintinnabuli, species counterpoint, song structure, MIDI and audio rendering. A tool never decides what is "good"; it mechanically applies a rule. The LLM decides *which* rules to invoke and *how* to combine them, so the music follows real theory and is not random.
 
-Two more invariants: all tools are **compatible** (the note/chord/degree/rhythm output of one is valid input to another), and **randomness is contained** in a few clearly-named, seeded tools (`random_notes`, `random_rhythm`) — everything else is deterministic. See [`CLAUDE.md`](CLAUDE.md) for the full design principles.
+Two more invariants: all tools are **compatible** (the note/chord/degree/rhythm output of one is valid input to another), and **randomness is contained** in a few clearly-marked, seeded tools (`random_notes`, `random_rhythm`, `melodic_walk`, and `arpeggiate(style="random")`) — each takes a `seed` and returns the seed it used; everything else is deterministic. See [`CLAUDE.md`](CLAUDE.md) for the full design principles.
 
 ## Note format
 
@@ -35,27 +35,27 @@ The toolset is organized by **layer** — scales, chords, harmony rules, melody,
 | Tool | What it does |
 |---|---|
 | `circle_of_fifths` | Key signatures, relative/parallel minors, and closely related keys (for modulations and bridges). |
-| `interval_between` | Name the interval between two notes (`C→Eb = m3`, `C→F# = A4` vs `C→Gb = d5`). |
-| `analyze_progression` | The inverse of `degrees_to_chords`: chords → roman numerals + functions, chromatic chords flagged. |
+| `interval_between` | Name the interval between two notes (`C→Eb = m3`, `C→F# = A4` vs `C→Gb = d5`). With octaves it names the real interval, compound or descending (`C4→C5 = P8`, `C4→E5 = M10`, `G4→C4 = P5 descending`). |
+| `analyze_progression` | The inverse of `degrees_to_chords`: chords → roman numerals + functions. A chord is in key only if **every** tone is (E7 in A natural minor is flagged, with `non_scale_notes: ["G#"]`); numerals follow spelling (`Gb` in C = `bV`, `F#` = `#IV`). |
 | `voice_leading` | Voice a progression smoothly (nearest inversion, common tones held) — natural pads instead of parallel blocks. |
 | `secondary_dominant` / `tritone_substitute` | Classic reharmonizations (`V/ii of Dm → A7`; `G7 → Db7`). |
-| `negative_harmony` | Reflect notes through a key's negative-harmony axis (major ↔ minor shadow). |
+| `negative_harmony` | Reflect notes through a key's negative-harmony axis (major ↔ minor shadow), in any key: `D F# A` in D → `A F D` (D minor). |
 | `harmonize_melody` | Put a chord under each melody note — searching the **whole** chord database — that reuses as many notes from the previous chord as possible, then voice-leads it. Returns ranked options + a `render_hint`. |
 
 ### Melody
 
 | Tool | What it does |
 |---|---|
-| `notes_from_degrees` | Write a melody as scale degrees → notes; transposable to any key/scale. `[1,2,3,5,8]` in C → `C D E G C`. |
+| `notes_from_degrees` | Write a melody as scale degrees → notes; transposable to any key/scale. `[1,2,3,5,8]` in C → `C D E G C`. Negative degrees count down on the same no-zero line `motif_grammar` uses: from `C4`, `-1 → B3`, `-7 → C3`. |
 | `motif_grammar` | Build a phrase from a form like `ABAC` over labeled motifs; a variant can `transpose`/`invert`/`retrograde`/`rotate` another. Works on notes, degrees, or rhythm. |
-| `melodic_walk` | A singable line by a seeded random walk over a scale ladder (mostly stepwise). |
-| `melodic_sequence` | Repeat a motif as a diatonic sequence (e.g. down a step each time). |
+| `melodic_walk` | 🎲 A singable line by a seeded random walk over a scale ladder (mostly stepwise). |
+| `melodic_sequence` | Repeat a motif as a diatonic sequence (e.g. down a step each time); the first copy is the motif as given, chromatic notes keep their offset. |
 | `arpeggiate` | Reorder a chord/scale into an arpeggio (up/down/updown/converge/…, multi-octave). |
 | `tintinnabuli_voice` | **Arvo Pärt's tintinnabuli:** shadow a melody with the nearest notes of a fixed triad (T1/T2, above/below/alternating). |
-| `counterpoint` | **Species counterpoint (1–5):** a rule-following counter-melody to a cantus firmus — note-against-note through florid, with passing tones and resolving suspensions, no parallel fifths/octaves. Returns a `render_hint` of ready tracks. |
+| `counterpoint` | **Species counterpoint (1–5):** a rule-following counter-melody to a cantus firmus — note-against-note through florid, with passing tones and prepared, resolving suspensions (7-6, 4-3, 9-8 above; 2-3, 9-10, 4-5 and a diminished 5th resolving to a 6th below), no parallel fifths/octaves. Returns a `render_hint` of ready tracks; if no line can obey every rule for a cantus, the closest one comes with a `warning`. |
 | `snap_to_scale` | Snap any line to the nearest scale notes — guarantees a melody fits the key/chords. |
-| `transpose_notes` | Transpose a note list by semitones. |
-| `random_notes` | 🎲 Uniform random picks from any note pool (seeded). |
+| `transpose_notes` | Transpose a note list by semitones, spelled as one interval so it stays in one key (`F A C` +1 → `Gb Bb Db`). |
+| `random_notes` | 🎲 Uniform random picks from any note pool (seeded); repeated pool notes count once. |
 
 ### Rhythm
 
@@ -69,14 +69,14 @@ The toolset is organized by **layer** — scales, chords, harmony rules, melody,
 
 | Tool | What it does |
 |---|---|
-| `plan_sections` | Lay out a form (`"intro verse chorus … outro"` / `"AABA"`) on the timeline — start bars, beats, seconds. |
+| `plan_sections` | Lay out a form (`"intro verse chorus … outro"` / an uppercase letter form `"AABA"`; a single word like `"verse"` is one section) on the timeline — start bars, beats, seconds. |
 | `arrange_song` | **The capstone:** assemble named sections (intro/verse/chorus/bridge/outro) into one whole-song MIDI; like-named tracks stitch into continuous parts. |
 | `notes_to_midi` / `chords_to_midi` / `drums_to_midi` | Render a single track (melody/scale, chords block-or-arpeggiated, GM drum lanes). |
 | `arrange_to_midi` | Render any number of fitting tracks (chords, bass, melody, drums) into one multi-track `.mid`. |
 | `song_to_midi` | Melody + chords as a two-track file (shortcut for the common case). |
 | `midi_to_audio` | Render any generated `.mid` into a **playable WAV** with a built-in synth (no soundfont needed). |
 
-MIDI/audio tools write to `./midi_output` (override per call with `output_dir` or globally with `MIDI_COMPOSER_OUTPUT_DIR`) and also return the file base64-encoded.
+MIDI tools write to `./midi_output` (override per call with `output_dir` or globally with `MIDI_COMPOSER_OUTPUT_DIR`) and also return the small `.mid` file base64-encoded; the file lasts exactly the reported `duration_seconds` (trailing rests included). `midi_to_audio` writes the WAV next to the `.mid` (or to `wav_file`) and returns base64 only when asked (`include_base64=true`) — audio is too large for most tool-result limits.
 
 ## Examples
 
@@ -92,13 +92,20 @@ get_scale("dorian", "E")            → E F# G A B C# D E
 **"What chord do the notes C, E, G make? And what scales fit them?"**
 ```
 match_chords(["C", "E", "G"])       → C (exact);  "E G C" → C/E (first inversion)
-match_scales(["C", "E", "G"])       → C major pentatonic, C major, A minor, …
+match_scales(["C", "E", "G"])       → C major pentatonic, E balinese pelog, D egyptian, … A minor pentatonic, …
 ```
-(Octaves are ignored, so `["C5","E5","G5"]` gives the same answer.)
+(Octaves are ignored, so `["C5","E5","G5"]` gives the same answer. Exact matches and smaller scales sort first, so 7-note scales such as C major come further down — raise `limit` or use `exact_only`.)
 
 **"A ii–V–I in F, with sevenths."**
 ```
 degrees_to_chords("F", "major", "ii V I", sevenths=True)   → Gm7  C7  Fmaj7
+degrees_to_chords("C", "natural minor", "i bVI bIII bVII") → Cm  Ab  Eb  Bb   (numerals as diatonic_chords prints them)
+```
+
+**"How far is C4 from E5? And which keys neighbour G♭?"**
+```
+interval_between("C4", "E5")        → major tenth (M10), 16 semitones, ascending
+circle_of_fifths("Gb")              → Gb major (6 flats), dominant Db, subdominant Cb, relative Eb minor
 ```
 
 **"A random melody from A minor pentatonic, then save it as MIDI."**
@@ -129,7 +136,15 @@ arrange_to_midi([                                          → one 4-track .mid
 tritone_substitute("G7")                  → Db7   (chromatic bass G→Db→C)
 secondary_dominant("Dm")                  → A7    (V7 of ii)
 analyze_progression(["C","A7","Dm","G7","C"], "C", "major")
-                                          → I, V7/ii (chromatic), ii, V7, I
+                                          → I, VI7 (chromatic: C# — it is the V7/ii), ii, V7, I
+```
+
+**"Is E7 in A minor? And what is the negative-harmony mirror of a D major chord?"**
+```
+analyze_progression(["Am","E7","Am"], "A", "natural minor")
+                                          → E7 = V7, in_key false, non_scale_notes ["G#"]  (borrowed from harmonic minor)
+analyze_progression(["Am","E7","Am"], "A", "harmonic minor")   → E7 = V7, in key, dominant
+negative_harmony(["D","F#","A"], "D")     → A F D   (D major ↔ D minor, in any key)
 ```
 
 **"Where can I modulate from C major?"**
@@ -152,7 +167,8 @@ harmonize_melody(["C5","E5","F5","A5","G5"], root="C", scale_type="major", in_sc
 **"Write a third-species counterpoint to a cantus firmus."**
 ```
 counterpoint(["C5","D5","E5","F5","E5","D5","C5"], "C", "major", species=3)
-   → cantus + a 4:1 counter-line (passing tones, perfect-consonance cadence, no parallel 5ths/8ves)
+   → cantus + a 4:1 counter-line (passing/neighbour tones between consonances, no parallel 5ths/8ves,
+     the final reached by step: … G5 A5 B5 C6)
    → plus render_hint.tracks  →  arrange_to_midi(<render_hint tracks>)  →  midi_to_audio(…)
 ```
 
@@ -167,16 +183,16 @@ notes_from_degrees("C5","major", <those degrees>)          → the realized, in-
 ```
 # Verse M-voice (A minor) + its tintinnabuli T-voice, over voice-led maj7/m7 pads:
 m = notes_from_degrees("A4","natural minor",
-       motif_grammar("ABAC", {"A":[1,2,3,2],"B":{"vary":"A","transpose":1},"C":[3,2,1,1]}, kind="degrees")["degrees"])
-t = tintinnabuli_voice(m, "Am", position="inferior", rank=1)          # nearest A-minor triad note below each M note
+       motif_grammar("ABAC", {"A":[1,2,3,2],"B":{"vary":"A","transpose":1},"C":[3,2,1,1]}, kind="degrees")["degrees"])["notes"]
+t = tintinnabuli_voice(m, "Am", position="inferior", rank=1)["t_voice"]   # nearest A-minor triad note below each M note
 verse_pads  = voice_leading(["Am7","Dm7","Fmaj7","Cmaj7"])["chords"]
 chorus_pads = voice_leading(["Fmaj7","Cmaj7","Dm7","Em7"])["chords"]
 
 arrange_song({                                                        # sequence sections into a song
   "verse":  {"bars":4, "tracks":[
      {"type":"chords","name":"pads","chords":verse_pads,"beats_per_chord":4,"program":89},
-     {"type":"notes","name":"M-voice","notes":m,"step_beats":2,"octave":5,"program":48,"sustain":true},
-     {"type":"notes","name":"T-voice","notes":t,"step_beats":2,"octave":4,"program":9,"sustain":true}]},
+     {"type":"notes","name":"M-voice","notes":m,"step_beats":1,"octave":5,"program":48,"sustain":true},
+     {"type":"notes","name":"T-voice","notes":t,"step_beats":1,"octave":4,"program":9,"sustain":true}]},
   "chorus": {"bars":4, "tracks":[
      {"type":"chords","name":"pads","chords":chorus_pads,"beats_per_chord":4,"program":89},
      {"type":"notes","name":"M-voice","notes":notes_from_degrees("C5","major",[5,6,8,6,5,3,2,1])["notes"],"step_beats":2,"octave":5,"program":48,"sustain":true},
@@ -196,6 +212,15 @@ The [**`demos/`**](demos/) folder is a gallery of finished pieces, each paired w
 
 ```bash
 python demos/generate.py                        # rewrites demos/*.mid and *.wav
+```
+
+### The book and the carousels
+
+[**`docs/book/the-rules-of-harmony.pdf`**](docs/book/the-rules-of-harmony.pdf) is a ~40-page musician's guide generated from the same rule tables the tools run: notes and spelling, intervals, all 45 scales and 37 chord types (each with a keyboard diagram), harmony in a key, the circle of fifths, voice leading and reharmonization, melody craft and tintinnabuli, species counterpoint, rhythm and form. [**`docs/carousels/`**](docs/carousels/) holds eight 2:3 slide decks (major scales in all 12 keys, the modes, diatonic chords per key, chord symbols, the circle of fifths key by key, negative harmony per key, counterpoint rules, Euclidean rhythms). Rebuild both after changing a rule:
+
+```bash
+pip install -e ".[book]"
+python docs/book/build_book.py && python docs/carousels/build_carousels.py
 ```
 
 ## Playable output
@@ -226,11 +251,11 @@ Every intermediate result is plain data the LLM can inspect, edit by hand (tweak
   {"type":"drums", "name":"drums", "lanes":{"kick":"O...O...","snare":"..O...O.","hat":"oooooooo"}}
 ]
 ```
-Shared per-track options: `name`, `velocity`, `start_beat` (beat offset for intros/drops), `step_beats`, `channel` (auto-assigned; drums forced to the GM percussion channel).
+Shared per-track options: `name`, `velocity`, `start_beat` (beat offset for intros/drops), `step_beats`, `channel` (auto-assigned around any channels you set explicitly; drums always go to the GM percussion channel 10). MIDI has 15 melodic channels, so more than 15 melodic tracks is an error — in `arrange_to_midi` give parts that share an instrument the same `channel`; in `arrange_song`, reuse a track `name` across sections. `arrange_song` writes a time signature matching its `beats_per_bar`.
 
 ## Installation
 
-Requires Python ≥ 3.10.
+Requires Python ≥ 3.10. The server is built on the MCP Python SDK 1.x (`FastMCP`); `mcp` 2.x renamed that API, so the dependency is pinned to `mcp>=1.2,<2`.
 
 ```bash
 # with uv (recommended)
@@ -251,8 +276,15 @@ uv run --with mcp --with mido python -m midi_composer_mcp.server
 ### Claude Code
 
 ```bash
+# from a clone, using the project's own virtualenv (code edits are picked up on restart):
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+claude mcp add midi-composer -e MIDI_COMPOSER_OUTPUT_DIR="$PWD/midi_output" -- "$PWD/.venv/bin/midi-composer-mcp"
+
+# or let uv manage the environment:
 claude mcp add midi-composer -- uv run --directory /path/to/midi-composer-mcp midi-composer-mcp
 ```
+
+`claude mcp add` defaults to the *local* scope (only this project directory); add `--scope user` to use the composer from any directory. Check it with `claude mcp get midi-composer`.
 
 ### Claude Desktop
 
@@ -271,9 +303,11 @@ claude mcp add midi-composer -- uv run --directory /path/to/midi-composer-mcp mi
 ## Development
 
 ```bash
-uv venv && uv pip install -e ".[dev]"
+uv venv && uv pip install -e ".[dev]"      # or: python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/python -m pytest
 ```
+
+Besides per-tool unit tests, `tests/test_invariants.py` holds **property sweeps** that guard whole classes of bugs: every key-relative tool must give the same result in all 12 keys (transposed), every chord spelling one tool accepts must work in the others, `analyze_progression` must round-trip `diatonic_chords` and judge key membership by every chord tone, the degree number line must have no gaps, and an independent Fux rule checker sweeps species 1–5 over many cantus firmi, keys and both positions. When you add a tool, add it to the relevant sweep.
 
 Layout:
 
@@ -284,9 +318,10 @@ src/midi_composer_mcp/
   chords.py       # chord database (35+, described), symbols, generation, matching
   diatonic.py     # chords per scale degree, degree-sequence resolution
   circle.py       # circle of fifths: key signatures and related keys
+  forms.py        # form strings ('AABA', 'intro verse chorus') -> ordered labels
   harmony.py      # intervals, roman-numeral analysis, voice leading, reharmonization
   melody.py       # degrees, arpeggios, walks, motif grammar, sequence, snap, tintinnabuli
-  counterpoint.py # first-species counterpoint (deterministic, rule-following)
+  counterpoint.py # species counterpoint 1-5 (deterministic, rule-following)
   generate.py     # seeded dice + euclidean rhythm + groove presets
   structure.py    # song structure: plan sections, assemble a whole song
   midi_io.py      # deterministic MIDI rendering: notes, chords, drums, multi-track (mido)
@@ -298,5 +333,7 @@ src/midi_composer_mcp/
 
 - Rhythmic chord comping (a `rhythm` on chord tracks, for stabs/funk/reggae)
 - Swing/shuffle and humanize (timing/velocity jitter as a seeded, mechanical step)
-- Higher-species counterpoint
-- Reading MIDI files back into note/chord data
+- Secondary-dominant labelling in `analyze_progression` (`A7` in C as `V7/ii`, not just a flagged `VI7`)
+- A `check_counterpoint` / `lint_progression` tool that reports rule violations in the caller's own lines
+- Key detection and pivot-chord modulation planning
+- Reading MIDI files back into note/chord data; MusicXML export for notation

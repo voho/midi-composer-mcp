@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .notes import Note, parse_notes, spell_pitch_class, spelling_for_pcs, transpose
+from .notes import Note, best_spelling, parse_notes, spelling_for_pcs, transpose
 
 MAJOR_DEGREES = (0, 2, 4, 5, 7, 9, 11)
 
@@ -24,6 +24,9 @@ class ScaleType:
     aliases: tuple[str, ...] = ()
     matchable: bool = True  # chromatic matches everything, so it is excluded
     description: str = ""
+    # Explicit degree labels, for non-heptatonic scales whose conventional
+    # spelling differs from the chromatic default (whole tone has #4 #5, not b5 b6).
+    labels: tuple[str, ...] = ()
 
 
 SCALES: dict[str, ScaleType] = {
@@ -96,7 +99,8 @@ SCALES: dict[str, ScaleType] = {
                   description="A suspended-sounding mode of the major pentatonic built on stacked 4ths and 5ths; open and unresolved."),
         # --- symmetric scales -------------------------------------------
         ScaleType("whole tone", (0, 2, 4, 6, 8, 10), ("wholetone",),
-                  description="Six notes a whole step apart; dreamlike and rootless with no leading tone, beloved by Debussy."),
+                  description="Six notes a whole step apart; dreamlike and rootless with no leading tone, beloved by Debussy.",
+                  labels=("1", "2", "3", "#4", "#5", "b7")),
         ScaleType("augmented", (0, 3, 4, 7, 8, 11), ("symmetric augmented",),
                   description="A six-note symmetric scale alternating minor 3rds and half steps; stark and built from two augmented triads."),
         ScaleType("diminished whole-half", (0, 2, 3, 5, 6, 8, 9, 11), ("diminished", "octatonic", "whole-half diminished"),
@@ -104,12 +108,13 @@ SCALES: dict[str, ScaleType] = {
         ScaleType("diminished half-whole", (0, 1, 3, 4, 6, 7, 9, 10), ("dominant diminished", "half-whole diminished"),
                   description="The octatonic scale starting with a half step; the go-to choice over dominant 7b9/#9 chords."),
         ScaleType("prometheus", (0, 2, 4, 6, 9, 10), ("mystic",),
-                  description="Scriabin's six-note 'mystic' scale built from the mystic chord; hovering, ambiguous and tense."),
+                  description="Scriabin's six-note 'mystic' scale built from the mystic chord; hovering, ambiguous and tense.",
+                  labels=("1", "2", "3", "#4", "6", "b7")),
         # --- bebop ------------------------------------------------------
         ScaleType("bebop dominant", (0, 2, 4, 5, 7, 9, 10, 11), ("bebop",),
                   description="Mixolydian plus a passing major 7th; the extra note keeps chord tones on the beat in fast bebop lines."),
         ScaleType("bebop major", (0, 2, 4, 5, 7, 8, 9, 11), (),
-                  description="The major scale with a passing #5; aligns chord tones to strong beats over major harmony."),
+                  description="The major scale with a passing b6 (#5); aligns chord tones to strong beats over major harmony."),
         ScaleType("spanish 8-tone", (0, 1, 3, 4, 5, 6, 8, 10), ("spanish gypsy", "jewish 8-tone"),
                   description="An eight-note flamenco scale extending phrygian dominant with chromatic passing tones for both 3rds."),
         # --- Japanese and world pentatonics -----------------------------
@@ -154,8 +159,13 @@ def resolve_scale_type(scale_type: str) -> ScaleType:
     return found
 
 
-def degree_labels(intervals: tuple[int, ...]) -> list[str]:
-    """Degree labels such as ['1', '2', 'b3', ...] for a scale's intervals."""
+def degree_labels(scale: "ScaleType | tuple[int, ...]") -> list[str]:
+    """Degree labels such as ['1', '2', 'b3', ...] for a scale (or bare intervals)."""
+    if isinstance(scale, ScaleType):
+        if scale.labels:
+            return list(scale.labels)
+        scale = scale.intervals
+    intervals = scale
     if len(intervals) == 7:
         labels = []
         for i, semis in enumerate(intervals):
@@ -177,13 +187,13 @@ def scale_notes(scale: ScaleType, root: Note) -> list[Note]:
     F major yields Bb rather than A#. If the root carries an octave, every
     note does too.
     """
-    labels = degree_labels(scale.intervals)
+    labels = degree_labels(scale)
     notes = [
         transpose(root, semis, _label_digit(label) - 1)
         for semis, label in zip(scale.intervals, labels)
     ]
     top_octave = None if root.octave is None else root.octave + 1
-    if top_octave is not None and root.midi + 12 > 127:
+    if top_octave is not None and not 0 <= root.midi <= root.midi + 12 <= 127:
         raise ValueError(f"Scale from {root.name} exceeds the MIDI range 0-127")
     notes.append(Note(root.letter, root.accidental, top_octave))
     return notes
@@ -197,7 +207,7 @@ def scale_info(scale_type: str, root: str | None = None) -> dict:
         "description": scale.description,
         "aliases": list(scale.aliases),
         "intervals": list(scale.intervals),
-        "degrees": degree_labels(scale.intervals),
+        "degrees": degree_labels(scale),
         "note_count": len(scale.intervals),
     }
     if root is not None:
@@ -220,7 +230,7 @@ def list_scales() -> dict:
                 "description": s.description,
                 "aliases": list(s.aliases),
                 "intervals": list(s.intervals),
-                "degrees": degree_labels(s.intervals),
+                "degrees": degree_labels(s),
                 "note_count": len(s.intervals),
             }
             for s in SCALES.values()
@@ -235,6 +245,8 @@ def match_scales(notes: str | list, exact_only: bool = False, limit: int = 20) -
     Results are sorted: exact matches first, then smaller (tighter) scales,
     then scales rooted on the first input note.
     """
+    if not isinstance(limit, int) or isinstance(limit, bool):
+        raise ValueError(f"limit must be an integer, got {limit!r}")
     parsed = parse_notes(notes)
     pcs = {n.pitch_class for n in parsed}
     spelling = spelling_for_pcs(parsed)
@@ -251,7 +263,7 @@ def match_scales(notes: str | list, exact_only: bool = False, limit: int = 20) -
             exact = pcs == scale_pcs
             if exact_only and not exact:
                 continue
-            root = spelling.get(root_pc) or spell_pitch_class(root_pc)
+            root = best_spelling(root_pc, lambda r, sc=scale: scale_notes(sc, r)[:-1], spelling)
             generated = scale_notes(scale, root)
             matches.append(
                 {

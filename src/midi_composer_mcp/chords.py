@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .notes import Note, parse_note, parse_notes, spell_pitch_class, spelling_for_pcs, transpose
+from .notes import Note, best_spelling, parse_note, parse_notes, spelling_for_pcs, transpose
 
 
 @dataclass(frozen=True)
@@ -54,31 +54,31 @@ CHORDS: dict[str, ChordType] = {
                   description="A major triad plus a major 7th; lush, warm and dreamy."),
         ChordType("minor 7", "m7", (("1", 0), ("b3", 3), ("5", 7), ("b7", 10)), ("min7", "-7"),
                   description="A minor triad plus a flat 7th; smooth and mellow, the workhorse of jazz and soul."),
-        ChordType("minor major 7", "mMaj7", (("1", 0), ("b3", 3), ("5", 7), ("7", 11)), ("mM7", "minmaj7", "m(maj7)"),
+        ChordType("minor major 7", "mMaj7", (("1", 0), ("b3", 3), ("5", 7), ("7", 11)), ("mM7", "minmaj7", "m(maj7)", "mΔ7", "mΔ"),
                   description="A minor triad with a major 7th; haunting and noir, famous from spy and horror themes."),
         ChordType("diminished 7", "dim7", (("1", 0), ("b3", 3), ("b5", 6), ("bb7", 9)), ("°7", "o7"),
                   description="Four stacked minor 3rds; fully symmetrical, maximally tense and endlessly modulating."),
         ChordType("half-diminished", "m7b5", (("1", 0), ("b3", 3), ("b5", 6), ("b7", 10)),
                   ("ø", "ø7", "min7b5", "m7(b5)", "half-diminished 7"),
                   description="A diminished triad plus a flat 7th; the classic ii of a minor key, darker than m7 but softer than dim7."),
-        ChordType("augmented 7", "7#5", (("1", 0), ("3", 4), ("#5", 8), ("b7", 10)), ("aug7", "+7"),
+        ChordType("augmented 7", "7#5", (("1", 0), ("3", 4), ("#5", 8), ("b7", 10)), ("aug7", "+7", "7+", "7aug"),
                   description="A dominant 7th with a raised 5th; an altered dominant that pulls hard toward resolution."),
         ChordType("augmented major 7", "maj7#5", (("1", 0), ("3", 4), ("#5", 8), ("7", 11)), ("augmaj7", "+M7"),
                   description="A major 7th with a raised 5th; shimmering and unstable."),
         ChordType("dominant 7 flat 5", "7b5", (("1", 0), ("3", 4), ("b5", 6), ("b7", 10)), (),
                   description="A dominant 7th with a lowered 5th; whole-tone flavored and tense."),
-        ChordType("dominant 7 sus 4", "7sus4", (("1", 0), ("4", 5), ("5", 7), ("b7", 10)), (),
+        ChordType("dominant 7 sus 4", "7sus4", (("1", 0), ("4", 5), ("5", 7), ("b7", 10)), ("7sus",),
                   description="A dominant 7th with a suspended 4th instead of the 3rd; a soulful, delayed resolution."),
         ChordType("dominant 7 sus 2", "7sus2", (("1", 0), ("2", 2), ("5", 7), ("b7", 10)), (),
                   description="A dominant 7th with the 2nd in place of the 3rd; airy and open."),
         # --- added-tone chords ------------------------------------------
-        ChordType("add 9", "add9", (("1", 0), ("3", 4), ("5", 7), ("9", 14)), (),
+        ChordType("add 9", "add9", (("1", 0), ("3", 4), ("5", 7), ("9", 14)), ("majadd9",),
                   description="A major triad with an added 9th and no 7th; bright and colorful."),
         ChordType("minor add 9", "madd9", (("1", 0), ("b3", 3), ("5", 7), ("9", 14)), ("m(add9)",),
                   description="A minor triad with an added 9th; wistful and modern."),
         ChordType("add 4", "add4", (("1", 0), ("3", 4), ("4", 5), ("5", 7)), ("add11",),
                   description="A major triad with an added 4th; lush and gently clashing, unlike sus4 which omits the 3rd."),
-        ChordType("six nine", "6/9", (("1", 0), ("3", 4), ("5", 7), ("6", 9), ("9", 14)), ("69", "6add9"),
+        ChordType("six nine", "6/9", (("1", 0), ("3", 4), ("5", 7), ("6", 9), ("9", 14)), ("69", "6add9", "maj6/9", "maj69"),
                   description="A major 6th chord with an added 9th; a rich, stable jazz ending chord."),
         ChordType("minor six nine", "m6/9", (("1", 0), ("b3", 3), ("5", 7), ("6", 9), ("9", 14)), ("m69",),
                   description="A minor 6th with an added 9th; smooth and sophisticated."),
@@ -115,7 +115,13 @@ CHORDS: dict[str, ChordType] = {
 
 
 def _normalize(name: str) -> str:
-    return re.sub(r"[\s_\-]+", "", name.strip().lower())
+    """Case-insensitive key: drop spaces, underscores and word hyphens ('half-diminished').
+
+    A hyphen next to a digit is kept — in a chord symbol it means minor ('-7') or
+    flat ('7-9'), so it must never silently disappear.
+    """
+    text = re.sub(r"[\s_]+", "", name.strip().lower())
+    return re.sub(r"(?<=[a-z])-(?=[a-z0-9])", "", text)  # 'half-diminished', 'dominant-7'
 
 
 # Exact (case-sensitive) lookup of symbols/aliases, e.g. "m7" vs "M7".
@@ -135,11 +141,48 @@ for _key in _folded_collisions:
     _CHORD_FOLDED.pop(_key, None)
 
 
+def _is_minor_type(chord: ChordType) -> bool:
+    return chord.symbol.startswith("m") and not chord.symbol.startswith("maj")
+
+
+def _lookup_suffix(suffix: str) -> ChordType | None:
+    """Resolve a chord suffix or type name, never guessing across major/minor.
+
+    Exact (case-sensitive) aliases win. Then jazz shorthands are translated: a
+    leading '-' is minor ('-9' = m9), '-'/'+' before a digit is flat/sharp
+    ('7-9' = 7b9, '7+5' = 7#5). The case-insensitive fallback keeps the meaning
+    of a leading m/M: uppercase 'M' before a number is major ('M9' = maj9), and
+    an M-suffix can never resolve to a minor chord (nor an m-suffix to a major
+    one) — an unknown symbol is rejected rather than misread.
+    """
+    text = suffix.strip()
+    if text in _CHORD_EXACT:
+        return _CHORD_EXACT[text]
+    minus = text.startswith("-")
+    if minus:
+        text = "m" + text[1:]
+    text = re.sub(r"(?<=\d)-(?=\d)", "b", text)
+    text = re.sub(r"(?<=\d)\+(?=\d)", "#", text)
+    # a bare uppercase M is major: M9 = maj9, M6/9 = maj6/9, Madd9 = majadd9, and 7M = maj7
+    folded_input = re.sub(r"^M(?=\d|add)", "maj", text)
+    folded_input = re.sub(r"^(\d+)M$", r"maj\1", folded_input)
+    found = _CHORD_EXACT.get(text) or _CHORD_FOLDED.get(_normalize(folded_input))
+    if found is None:
+        return None
+    if minus and not _is_minor_type(found):
+        return None  # '-' means minor: '-aj7' must not become 'maj7'
+    if re.match(r"M(?!aj|AJ|in|IN)", text) and _is_minor_type(found):  # a bare 'M' marks major
+        return None
+    if (text.startswith("m") and not text.startswith(("maj", "ma7", "major"))
+            and not _is_minor_type(found)):
+        return None
+    return found
+
+
 def resolve_chord_type(chord_type: str) -> ChordType:
     if not isinstance(chord_type, str):
         raise ValueError(f"Chord type must be a string, got {type(chord_type).__name__}")
-    text = chord_type.strip()
-    found = _CHORD_EXACT.get(text) or _CHORD_FOLDED.get(_normalize(text))
+    found = _lookup_suffix(chord_type)
     if found is None:
         known = ", ".join(f"{c.name} ({c.symbol or 'no suffix'})" for c in CHORDS.values())
         raise ValueError(f"Unknown chord type: {chord_type!r}. Known types: {known}")
@@ -179,17 +222,19 @@ def parse_chord_symbol(symbol: str) -> tuple[Note, ChordType, Note | None]:
     bass: Note | None = None
 
     def _try(suffix: str, octave: str | None) -> tuple[Note, ChordType] | None:
-        chord = _CHORD_EXACT.get(suffix) or _CHORD_FOLDED.get(_normalize(suffix)) if suffix else CHORDS["major"]
+        chord = _lookup_suffix(suffix) if suffix else CHORDS["major"]
         if chord is None:
             return None
         return parse_note(root_text + (octave or "")), chord
 
     # 1) whole remainder as a suffix ("C7" -> dominant 7, "C6/9" -> six nine)
     parsed = _try(rest, None)
-    # 2) a leading digit as an octave, remainder as suffix ("C4", "C4m7", "C47")
+    # 2) a leading digit as an octave, remainder as suffix ("C4", "C4m7", "C47") —
+    #    but not when the digit is a chord number that the text goes on to alter
+    #    ("C9sus4", "C7alt", "C7(b9)"): those are unknown chords, not octaves.
     if parsed is None:
-        m2 = re.match(r"^(-?\d)(.*)$", rest)
-        if m2:
+        m2 = re.match(r"^(-1|\d)(.*)$", rest)  # octaves run -1..9: 'C-5' is no octave
+        if m2 and not (m2.group(1) in "79" and re.match(r"(sus|add|alt|aug|M|[b#+\-(])", m2.group(2))):
             parsed = _try(m2.group(2).strip(), m2.group(1))
     # 3) slash bass ("C/E", "Cm7/G", "C4maj7/G3")
     if parsed is None and "/" in rest:
@@ -261,8 +306,25 @@ def identify_chord_quality(relative_pcs: frozenset[int]) -> ChordType | None:
     return None
 
 
-_INVERSION_NAMES = ("root position", "first inversion", "second inversion",
-                    "third inversion", "fourth inversion", "fifth inversion")
+# Inversion named by the chord member in the bass: the 3rd is first inversion, the
+# 5th second, the 7th third. A sus 2nd/4th stands in for the 3rd (first inversion).
+# Any other tone (an added 6th or 9th...) is named by its place among the chord's
+# tones, so an n-note chord never has more than n-1 inversions.
+_INVERSION_ORDINALS = ("root position", "first inversion", "second inversion", "third inversion",
+                       "fourth inversion", "fifth inversion", "sixth inversion")
+
+
+def _inversion_name(chord: ChordType, position: int) -> str:
+    label = chord.degrees[position][0]
+    number = int(label.lstrip("#b"))
+    has_third = any(int(l.lstrip("#b")) == 3 for l, _ in chord.degrees)
+    if number in (3, 5, 7):
+        index = (number - 1) // 2
+    elif number in (2, 4) and not has_third:
+        index = 1
+    else:
+        index = position
+    return _INVERSION_ORDINALS[min(index, len(chord.degrees) - 1)]
 
 
 def match_chords(notes: str | list, include_partial: bool = True, limit: int = 20) -> dict:
@@ -273,6 +335,8 @@ def match_chords(notes: str | list, include_partial: bool = True, limit: int = 2
     "partial": every input note belongs to the chord, which has more notes;
     the missing notes are listed.
     """
+    if not isinstance(limit, int) or isinstance(limit, bool):
+        raise ValueError(f"limit must be an integer, got {limit!r}")
     parsed = parse_notes(notes)
     pcs = frozenset(n.pitch_class for n in parsed)
     spelling = spelling_for_pcs(parsed)
@@ -286,7 +350,7 @@ def match_chords(notes: str | list, include_partial: bool = True, limit: int = 2
             is_exact = chord_pcs == pcs
             if not is_exact and not (include_partial and pcs < chord_pcs):
                 continue
-            root = spelling.get(root_pc) or spell_pitch_class(root_pc)
+            root = best_spelling(root_pc, lambda r, c=chord: chord_notes(c, r), spelling)
             tones = chord_notes(chord, root)
             entry = {
                 "match": "exact" if is_exact else "partial",
@@ -303,8 +367,7 @@ def match_chords(notes: str | list, include_partial: bool = True, limit: int = 2
                     )
                     entry["bass"] = bass.pitch_class_name
                     entry["symbol"] += f"/{bass.pitch_class_name}"
-                    if position < len(_INVERSION_NAMES):
-                        entry["inversion"] = _INVERSION_NAMES[position]
+                    entry["inversion"] = _inversion_name(chord, position)
                 entry["_sort"] = (bass.pitch_class != root_pc, len(chord.degrees), chord.name, root.name)
                 exact.append(entry)
             else:

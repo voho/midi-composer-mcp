@@ -9,12 +9,11 @@ that feeds straight into a notes track, the rhythm tools, or the renderers.
 
 from __future__ import annotations
 
-import random
 import re
 
 from .forms import resolve_form
-from .generate import parse_rhythm
-from .notes import Note, note_from_midi, parse_note, parse_notes, transpose
+from .generate import _make_rng, parse_rhythm
+from .notes import LETTER_PCS, LETTERS, Note, note_from_midi, parse_note, parse_notes, transpose, transpose_all
 from .scales import _label_digit, degree_labels, resolve_scale_type
 
 
@@ -41,23 +40,36 @@ def _parse_degree_tokens(degrees) -> list[int]:
     return out
 
 
+# Scale degrees live on a number line with no 0 (...-2, -1, 1, 2, 3...). These
+# convert to a contiguous index so transpose/invert never produce degree 0.
+def _deg_to_idx(d: int) -> int:
+    return d - 1 if d > 0 else d
+
+
+def _idx_to_deg(i: int) -> int:
+    return i + 1 if i >= 0 else i
+
+
 def notes_from_degrees(root: str, scale_type: str, degrees) -> dict:
     """Resolve a melody written as scale degrees into concrete notes.
 
     Degree 1 is the root; degrees beyond the scale length wrap into higher
-    octaves (8 = root up an octave, 9 = the 2nd up an octave); negative
-    degrees go below the root. e.g. in C major, [1,2,3,5,8] -> C D E G C.
+    octaves (8 = root up an octave, 9 = the 2nd up an octave). Negative
+    degrees count down from the root on the same no-zero number line that
+    motif_grammar uses: -1 = one scale step below the root, -2 = two steps
+    below, -7 = the root an octave down (in a 7-note scale). e.g. in C major,
+    [1,2,3,5,8] -> C D E G C and from 'C4', [1,-1,-3] -> C4 B3 G3.
     Octave-aware if the root carries one. Deterministic.
     """
     scale = resolve_scale_type(scale_type)
     root_note = parse_notes(root)[0]
-    labels = degree_labels(scale.intervals)
+    labels = degree_labels(scale)
     n = len(scale.intervals)
     tokens = _parse_degree_tokens(degrees)
 
     out: list[Note] = []
     for d in tokens:
-        octs, pos = divmod(d - 1, n)
+        octs, pos = divmod(_deg_to_idx(d), n)
         semitones = scale.intervals[pos] + 12 * octs
         letter_steps = (_label_digit(labels[pos]) - 1) + 7 * octs
         out.append(transpose(root_note, semitones, letter_steps))
@@ -78,10 +90,11 @@ def arpeggiate_notes(notes, style: str = "up", octaves: int = 1,
 
     Pure reordering — no new pitches except optional octave copies. `style`:
     up, down, updown, downup (no repeated turn note), converge (outside-in),
-    diverge (inside-out), or random (seeded). `octaves` stacks that many octave
-    copies first (requires the notes to carry octaves, e.g. a chord from a root
-    like 'C4'). Feed a chord's `notes` here to build an arp or a broken-chord
-    bass line.
+    diverge (inside-out, the mirror of converge), or random (seeded). `octaves`
+    stacks that many octave copies first (requires the notes to carry octaves,
+    e.g. a chord from a root like 'C4'); a pitch already present is not doubled,
+    so a scale C4..C5 over 2 octaves runs C4..C6 with one C5. Feed a chord's
+    `notes` here to build an arp or a broken-chord bass line.
     """
     if style not in _ARP_STYLES:
         raise ValueError(f"style must be one of {_ARP_STYLES}, got {style!r}")
@@ -94,9 +107,15 @@ def arpeggiate_notes(notes, style: str = "up", octaves: int = 1,
                 "octaves > 1 needs notes with octaves (e.g. a chord from a root like 'C4')"
             )
         expanded: list[Note] = []
+        seen: set[int] = set()
         for k in range(octaves):
             for n in parsed:
-                expanded.append(Note(n.letter, n.accidental, n.octave + k))
+                copy = Note(n.letter, n.accidental, n.octave + k)
+                if not 0 <= copy.midi <= 127:
+                    raise ValueError(f"{octaves} octaves of {n.name} leave the MIDI range 0-127 ({copy.name})")
+                if copy.midi not in seen:  # a scale's top root is the next copy's bottom root
+                    seen.add(copy.midi)
+                    expanded.append(copy)
         parsed = expanded
     names = [n.name for n in parsed]
 
@@ -105,11 +124,10 @@ def arpeggiate_notes(notes, style: str = "up", octaves: int = 1,
     elif style == "down":
         seq = names[::-1]
     elif style == "updown":
-        seq = names + names[::-1][1:-1] if len(names) > 2 else names + names[::-1]
+        seq = names + names[-2:0:-1]  # looping it never repeats a turn note
     elif style == "downup":
-        rev = names[::-1]
-        seq = rev + names[1:-1] if len(names) > 2 else rev + names
-    elif style == "converge":
+        seq = names[::-1] + names[1:-1]
+    elif style in ("converge", "diverge"):
         seq = []
         lo, hi = 0, len(names) - 1
         while lo <= hi:
@@ -117,19 +135,10 @@ def arpeggiate_notes(notes, style: str = "up", octaves: int = 1,
             if lo != hi:
                 seq.append(names[hi])
             lo, hi = lo + 1, hi - 1
-    elif style == "diverge":
-        seq = []
-        mid = (len(names) - 1) // 2
-        offset = 0
-        while len(seq) < len(names):
-            for j in (mid - offset, mid + offset) if offset else (mid,):
-                if 0 <= j < len(names) and names[j] not in seq[-2:] and len(seq) < len(names):
-                    seq.append(names[j])
-            offset += 1
-        seq = seq[: len(names)]
+        if style == "diverge":
+            seq = seq[::-1]
     else:  # random
-        used_seed = seed if seed is not None else random.SystemRandom().randrange(2**32)
-        rng = random.Random(used_seed)
+        rng, used_seed = _make_rng(seed)
         seq = names[:]
         rng.shuffle(seq)
     result = {"notes": seq, "style": style, "octaves": octaves}
@@ -156,8 +165,7 @@ def melodic_walk(notes, length: int = 8, seed: int | None = None,
         raise ValueError(f"max_step must be an integer between 1 and 12, got {max_step!r}")
     if not isinstance(start, int) or isinstance(start, bool) or not 0 <= start < len(names):
         raise ValueError(f"start must be an index between 0 and {len(names) - 1}, got {start!r}")
-    used_seed = seed if seed is not None else random.SystemRandom().randrange(2**32)
-    rng = random.Random(used_seed)
+    rng, used_seed = _make_rng(seed)
 
     idx = start
     out = [names[idx]]
@@ -181,16 +189,6 @@ def _grammar_literal(spec, kind: str):
     return [n.name for n in parse_notes(spec)]  # notes
 
 
-# Scale degrees live on a number line with no 0 (...-2, -1, 1, 2, 3...). These
-# convert to a contiguous index so transpose/invert never produce degree 0.
-def _deg_to_idx(d: int) -> int:
-    return d - 1 if d > 0 else d
-
-
-def _idx_to_deg(i: int) -> int:
-    return i + 1 if i >= 0 else i
-
-
 def _grammar_transform(seq, spec: dict, kind: str):
     """Apply variation transforms in a fixed order: retrograde, invert, rotate, transpose."""
     seq = list(seq)
@@ -201,8 +199,19 @@ def _grammar_transform(seq, spec: dict, kind: str):
             parsed = [parse_note(n) for n in seq]
             if any(p.octave is None for p in parsed):
                 raise ValueError("invert on notes needs octaves (e.g. 'C5'), so it can mirror pitches")
-            pivot = parsed[0].midi
-            seq = [note_from_midi(max(0, min(127, 2 * pivot - p.midi))).name for p in parsed]
+            pivot = parsed[0]
+            pivot_pos = LETTERS.index(pivot.letter) + 7 * pivot.octave
+            seq = []
+            for p in parsed:
+                m = 2 * pivot.midi - p.midi
+                if not 0 <= m <= 127:
+                    raise ValueError(f"inverting {p.name} around {pivot.name} leaves the MIDI range 0-127")
+                # mirror the letter too, so the spelled intervals mirror (F G A Bb -> F Eb Db C)
+                pos = 2 * pivot_pos - (LETTERS.index(p.letter) + 7 * p.octave)
+                octave, letter_idx = divmod(pos, 7)
+                letter = LETTERS[letter_idx]
+                accidental = m - (LETTER_PCS[letter] + (octave + 1) * 12)
+                seq.append((Note(letter, accidental, octave) if abs(accidental) <= 2 else note_from_midi(m)).name)
         elif kind == "degrees":
             pivot = _deg_to_idx(seq[0])
             seq = [_idx_to_deg(2 * pivot - _deg_to_idx(d)) for d in seq]
@@ -220,7 +229,7 @@ def _grammar_transform(seq, spec: dict, kind: str):
         if not isinstance(t, int) or isinstance(t, bool):
             raise ValueError("transpose must be an integer (semitones for notes, scale steps for degrees)")
         if kind == "notes":
-            seq = [transpose(parse_note(n), t).name for n in seq]
+            seq = [n.name for n in transpose_all([parse_note(n) for n in seq], t)]
         elif kind == "degrees":
             seq = [_idx_to_deg(_deg_to_idx(d) + t) for d in seq]
         else:
@@ -255,7 +264,7 @@ def motif_grammar(form, motifs, kind: str = "notes") -> dict:
         raise ValueError(f"kind must be one of {_GRAMMAR_KINDS}, got {kind!r}")
     if not isinstance(motifs, dict) or not motifs:
         raise ValueError("motifs must be a non-empty mapping of label to a sequence or variation")
-    labels = resolve_form(form)
+    labels = resolve_form(form, known=motifs)
 
     resolved: dict[str, object] = {}
     resolving: set[str] = set()
@@ -271,8 +280,8 @@ def motif_grammar(form, motifs, kind: str = "notes") -> dict:
         spec = motifs[label]
         if isinstance(spec, dict):
             base = spec.get("vary", spec.get("from"))
-            if base is None:
-                raise ValueError(f"motif {label!r} variation needs 'vary': '<other label>'")
+            if not isinstance(base, str):
+                raise ValueError(f"motif {label!r} variation needs 'vary': '<other label>' (a string)")
             seq = _grammar_transform(resolve(base), spec, kind)
         else:
             seq = _grammar_literal(spec, kind)
@@ -302,30 +311,30 @@ def transpose_notes(notes, semitones: int) -> dict:
 
     Deterministic — useful for key changes, moving a motif, or building a
     sequence by repeating a phrase at a new pitch level. e.g. transposing
-    ['C4','E4','G4'] by 5 -> F4 A4 C5.
+    ['C4','E4','G4'] by 5 -> F4 A4 C5. The whole list moves by one spelled
+    interval, so it stays in one key: F A C up 1 -> Gb Bb Db (not Gb A# C#).
     """
     if not isinstance(semitones, int) or isinstance(semitones, bool) or not -48 <= semitones <= 48:
         raise ValueError(f"semitones must be an integer between -48 and 48, got {semitones!r}")
     parsed = parse_notes(notes)
     return {
         "semitones": semitones,
-        "notes": [transpose(n, semitones).name for n in parsed],
+        "notes": [n.name for n in transpose_all(parsed, semitones)],
     }
 
 
 def _pitch_table(spelled: list[Note]) -> list[tuple[int, Note]]:
     """All MIDI pitches (0-127) of a set of pitch classes, with the given spelling."""
-    table: list[tuple[int, Note]] = []
-    seen: set[int] = set()
+    by_pc: dict[int, Note] = {}
     for note in spelled:
-        for octave in range(-1, 10):
-            n = Note(note.letter, note.accidental, octave)
-            m = n.midi
-            if 0 <= m <= 127 and m not in seen:
-                seen.add(m)
-                table.append((m, n))
-    table.sort()
-    return table
+        by_pc.setdefault(note.pitch_class, note)
+    return [(m, _same_pitch(by_pc[m % 12], m)) for m in range(128) if m % 12 in by_pc]
+
+
+def _same_pitch(spelling: Note, midi: int) -> Note:
+    """`spelling` with the octave that sounds `midi` (B4 respelled as Cb is Cb5, not Cb4)."""
+    return Note(spelling.letter, spelling.accidental,
+                (midi - LETTER_PCS[spelling.letter] - spelling.accidental) // 12 - 1)
 
 
 def snap_to_scale(notes, root: str, scale_type: str) -> dict:
@@ -348,13 +357,14 @@ def snap_to_scale(notes, root: str, scale_type: str) -> dict:
     out: list[Note] = []
     changed = 0
     for n in parse_notes(notes):
-        if n.pitch_class in pc_to_note:  # already diatonic — respell canonically
+        if n.pitch_class in pc_to_note:  # already diatonic — respell canonically, same pitch
             canon = pc_to_note[n.pitch_class]
-            out.append(canon if n.octave is None else Note(canon.letter, canon.accidental, n.octave))
+            out.append(canon if n.octave is None else _same_pitch(canon, n.midi))
             continue
         changed += 1
-        if n.octave is None:  # nearest scale pitch class (tie -> lower)
-            best = min(scale_pcs, key=lambda pc: (min((n.pitch_class - pc) % 12, (pc - n.pitch_class) % 12), pc))
+        if n.octave is None:  # nearest scale pitch class (tie -> the one below, even across B/C)
+            best = min(scale_pcs, key=lambda pc: (min((n.pitch_class - pc) % 12, (pc - n.pitch_class) % 12),
+                                                  (n.pitch_class - pc) % 12 > 6))
             out.append(pc_to_note[best])
         else:  # nearest scale pitch by absolute distance (tie -> lower)
             out.append(min(table, key=lambda t: (abs(t[0] - n.midi), t[0]))[1])
@@ -372,9 +382,11 @@ def melodic_sequence(notes, root: str, scale_type: str, step: int = -1,
 
     A melodic sequence restates a motif at a new pitch level: e.g. step=-1,
     count=4 walks the motif down one scale degree each time (the descending
-    sequences of Baroque and pop). The shift stays in `root`/`scale_type`, so
-    the result is diatonic and chord-compatible. The first copy is the motif
-    itself. Deterministic.
+    sequences of Baroque and pop). The shift stays in `root`/`scale_type`, so a
+    diatonic motif stays diatonic and chord-compatible. The first copy is the
+    motif itself; a chromatic motif note keeps its offset from the scale note
+    below it in every copy (a C# passing tone in C major becomes B# one step
+    down). A copy that would leave the MIDI range raises. Deterministic.
     """
     from .scales import resolve_scale_type, scale_notes  # local import avoids cycle
 
@@ -388,17 +400,20 @@ def melodic_sequence(notes, root: str, scale_type: str, step: int = -1,
     ladder_midis = [m for m, _ in ladder]
 
     seq_notes = assign_octaves_for_sequence(parse_notes(notes))
-    indices = []
+    anchors = []  # (ladder index of the scale note at or below, semitones and letters above it)
     for n in seq_notes:
-        target = min(range(len(ladder)), key=lambda i: abs(ladder_midis[i] - n.midi))
-        indices.append(target)
+        idx = max(i for i, m in enumerate(ladder_midis) if m <= n.midi) if n.midi >= ladder_midis[0] else 0
+        letters = (LETTERS.index(n.letter) - LETTERS.index(ladder[idx][1].letter)) % 7
+        anchors.append((idx, n.midi - ladder_midis[idx], letters))
 
-    out: list[str] = []
-    for k in range(count):
-        for idx in indices:
+    out: list[str] = [n.name for n in seq_notes]
+    for k in range(1, count):
+        for idx, offset, letters in anchors:
             j = idx + k * step
-            j = max(0, min(len(ladder) - 1, j))  # clamp at the ladder ends
-            out.append(ladder[j][1].name)
+            if not 0 <= j < len(ladder) or ladder_midis[j] + offset > 127:
+                raise ValueError(f"copy {k + 1} of the sequence leaves the MIDI range 0-127; lower count or step")
+            base = ladder[j][1]
+            out.append((base if offset == 0 else transpose(base, offset, letters)).name)
     return {
         "root": root_note.name,
         "scale_type": scale.name,
@@ -417,9 +432,15 @@ _TINT_POSITIONS = ("superior", "inferior", "alternating")
 
 
 def _parse_triad(triad) -> list[Note]:
-    if isinstance(triad, str) and len(triad.split()) == 1 and len(triad.strip()) > 1:
+    """A triad given as a chord symbol ('D', 'Am', ['F#m']) or as notes ('A C E', 'A,C,E')."""
+    tokens = None
+    if isinstance(triad, str):
+        tokens = [t for t in re.split(r"[,\s]+", triad.strip()) if t]
+    elif isinstance(triad, (list, tuple)) and all(isinstance(t, str) for t in triad):
+        tokens = [t for item in triad for t in re.split(r"[,\s]+", item.strip()) if t]
+    if tokens is not None and len(tokens) == 1:  # one token = a chord symbol, even "D"
         from .chords import chord_notes, parse_chord_symbol  # local import avoids cycle
-        root, chord, _ = parse_chord_symbol(triad)
+        root, chord, _ = parse_chord_symbol(tokens[0])
         return chord_notes(chord, root)
     parsed = parse_notes(triad)
     if len(parsed) < 2:
@@ -462,11 +483,12 @@ def tintinnabuli_voice(melody, triad, position: str = "superior", rank: int = 1,
             cands = [n for (mm, n) in table if mm > m]
         else:
             cands = [n for (mm, n) in reversed(table) if mm < m]
-        if not cands:
+        if len(cands) < rank:
             raise ValueError(
-                f"no triad note {pos} of {mn.name}; move the melody octave or change position"
+                f"no rank-{rank} triad note {pos} of {mn.name}; move the melody octave,"
+                f" lower the rank or change position"
             )
-        t_voice.append(cands[min(rank, len(cands)) - 1])
+        t_voice.append(cands[rank - 1])
 
     return {
         "position": position,

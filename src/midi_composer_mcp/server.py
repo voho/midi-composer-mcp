@@ -363,8 +363,8 @@ def melodic_sequence(notes: str | list[str], root: str, scale_type: str,
 
     Restates a motif at successive pitch levels within `root`/`scale_type` — e.g.
     step=-1, count=4 walks it down one scale degree per repeat (the classic
-    descending sequence). Stays in key, so it remains chord-compatible. The first
-    copy is the motif itself.
+    descending sequence). Diatonic motif notes stay in key; a chromatic note keeps
+    its offset from the scale note below it. The first copy is the motif itself.
     """
     return _melody.melodic_sequence(notes, root, scale_type, step=step, count=count)
 
@@ -455,7 +455,7 @@ def counterpoint(cantus: str | list[str], root: str, scale_type: str = "major",
 # ----------------------------------------------------------- song structure
 
 @mcp.tool()
-def plan_sections(form: str | list[str], bars=8, beats_per_bar: int = 4,
+def plan_sections(form: str | list[str], bars: int | dict[str, int] = 8, beats_per_bar: int = 4,
                   tempo: int | None = None) -> dict:
     """Lay out a song form on the timeline: where each section starts and how long it lasts.
 
@@ -483,7 +483,9 @@ def arrange_song(sections: dict, form: str | list[str] | None = None, tempo: int
     repeats allowed; omitted = each section once in given order). Sections are
     placed end to end, and tracks sharing a `name` across sections are stitched
     into one continuous MIDI track (so "bass" is a single track for the whole
-    song; a part used only in the chorus simply rests elsewhere). Compose each
+    song; a part used only in the chorus simply rests elsewhere; a different
+    `program` in a later section switches the instrument there). Name your
+    tracks; unnamed ones become 'notes' (or 'notes_1', 'notes_2'...). Compose each
     layer with the scale/chord/melody/rhythm tools, drop them into sections, and
     sequence — then midi_to_audio to hear it. Returns the file plus a section
     timeline and per-track summary.
@@ -618,7 +620,7 @@ def arrange_to_midi(tracks: list[dict], tempo: int = 120, step_beats: float = 0.
 
 @mcp.tool()
 def midi_to_audio(midi_file: str, wav_file: str | None = None,
-                  sample_rate: int = 44100) -> dict:
+                  sample_rate: int = 44100, include_base64: bool = False) -> dict:
     """Synthesize a generated MIDI file into a playable WAV audio file.
 
     A .mid file needs a synthesizer/soundfont to be heard; this renders one to
@@ -626,10 +628,14 @@ def midi_to_audio(midi_file: str, wav_file: str | None = None,
     a simple built-in synth (additive tones for pitched parts, percussive
     synthesis for General MIDI drums) — no soundfont required. Pass the `file`
     path returned by notes_to_midi / chords_to_midi / drums_to_midi /
-    song_to_midi / arrange_to_midi. Returns the WAV path, duration and base64.
+    song_to_midi / arrange_to_midi. The WAV is written next to the .mid unless
+    `wav_file` names another path. Returns the WAV path, size and duration;
+    `include_base64=true` also returns the audio base64-encoded (large — a few
+    seconds is already hundreds of KB). Renders at most the first 5 minutes.
     This is a preview render, not a production mix.
     """
-    return _audio.render_midi_to_wav(midi_file, wav_path=wav_file, sample_rate=sample_rate)
+    return _audio.render_midi_to_wav(midi_file, wav_path=wav_file, sample_rate=sample_rate,
+                                     include_base64=include_base64)
 
 
 def main() -> None:

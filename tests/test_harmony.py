@@ -211,9 +211,9 @@ def test_counterpoint_follows_rules():
 
 
 def test_counterpoint_deterministic():
-    cf = ["D5", "F5", "E5", "D5", "G5", "F5", "A5", "G5", "F5", "E5", "D5"]
-    a = first_species(cf, "C", "major", "above")
-    b = first_species(cf, "C", "major", "above")
+    cf = ["D5", "F5", "E5", "D5", "G5", "F5", "A5", "G5", "F5", "E5", "D5"]  # Fux's Dorian cantus
+    a = first_species(cf, "D", "dorian", "above")
+    b = first_species(cf, "D", "dorian", "above")
     assert a["counterpoint"] == b["counterpoint"]
     assert _parallel_perfect_violations(cf, a["counterpoint"]) == 0
 
@@ -277,6 +277,21 @@ def test_species4_suspensions_resolve_down():
     steps = [abs(b - a) for a, b in zip(cpm, cpm[1:])]
     assert max(steps) <= 12
     assert r["ratio"] == "syncopated"
+
+
+def test_counterpoint_needs_a_tonic_ending():
+    with pytest.raises(ValueError, match="end on the tonic"):
+        species_counterpoint(["C4", "D4", "E4", "F4", "G4"], "C", "major", species=1)
+    with pytest.raises(ValueError, match="end on the tonic"):
+        first_species(["C4", "D4", "E4", "F4", "G4"], "C", "major", "above")
+
+
+def test_counterpoint_judges_intervals_by_spelling():
+    # G#4-F5 in A harmonic minor spans 9 semitones like a M6 but is a diminished 7th
+    r = species_counterpoint(["A4", "G#4", "C5", "B4", "A4"], "A", "harmonic minor", species=1)
+    assert all(d in {"P1/P8", "m3", "M3", "P5", "m6", "M6"} for d in r["downbeat_intervals"])
+    r4 = species_counterpoint(["C5", "D5", "E5", "F5", "E5", "D5", "C5"], "C", "major", species=4)
+    assert not any(d.endswith("st") for d in r4["downbeat_intervals"])  # named, e.g. 'm7'
 
 
 def test_species_below():
