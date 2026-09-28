@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import re
 
 import pytest
 
@@ -197,6 +198,44 @@ def test_error_messages_explain_the_rule():
         roman_to_chords("viiø6", "C")
 
 
+def test_lowercase_numeral_with_m7_is_the_minor_seventh():
+    # the 'm' after a lowercase numeral is redundant: iim7 = ii7 = Dm7 (Levine), never minor-major
+    assert roman_to_chords("iim7 vim7 iiim7", "C")["symbols"] == ["Dm7", "Am7", "Em7"]
+    ii = chord("iim7")
+    assert (ii["roman"], ii["chord_type"], ii["kind"], ii["in_key"]) == ("ii7", "minor 7", "diatonic", True)
+    assert sym("im7", "C", "natural minor") == "Cm7"
+    assert sym("iim7/V") == "Am7"
+    for token in ("iimM7", "iiΔ7", "iimaj7"):                      # minor-major is written with Δ / M
+        assert sym(token) == "DmMaj7", token
+    assert sym("iimin7") == "Dm7" and sym("iim9") == "Dm9" and sym("iim7b5") == "Dm7b5"
+    # the classical 'mm7' (minor-minor seventh) no longer folds onto minor-major 7: it is rejected
+    with pytest.raises(ValueError):
+        parse_chord_symbol("Dmm7")
+    assert parse_chord_symbol("DmM7")[1].name == "minor major 7"
+    assert degrees_to_chords("C", "major", "iim7", True)["warnings"] == []
+
+
+@pytest.mark.parametrize("scale", HEPTATONIC)
+def test_m7_after_a_lowercase_numeral_in_every_key(scale):
+    for tonic in TONICS:
+        for numeral in ("i", "ii", "iii", "iv", "v", "vi", "vii"):
+            got, want = chord(f"{numeral}m7", tonic, scale), chord(f"{numeral}7", tonic, scale)
+            assert got["chord_type"] == "minor 7", (scale, tonic, numeral)
+            assert got["symbol"] == want["symbol"] and got["roman"] == want["roman"], (scale, tonic, numeral)
+
+
+def test_full_figured_bass_forms_get_an_accurate_message():
+    # 643/642 are complete figures, not an 'embellished chord (6)' plus an inversion
+    for token, shorthand in (("V643", "V43"), ("V642", "V42"), ("V653", "V65"), ("V63", "V6"), ("V53", "V"),
+                             ("V753", "V7"), ("viiø643", "viiø43"), ("IΔ642", "IΔ42"), ("V643/V", "V43/V")):
+        with pytest.raises(ValueError) as err:
+            roman_to_chords(token, "C")
+        assert f"shorthand {shorthand!r}" in str(err.value) and "embellished" not in str(err.value), token
+        assert roman_to_chords(shorthand, "C")["symbols"]            # the advice reads back
+    with pytest.raises(ValueError, match="Hookpad"):              # a real embellished chord still is one
+        roman_to_chords("V96", "C")
+
+
 def test_requires_heptatonic_scale_and_valid_input():
     with pytest.raises(ValueError, match="7-note"):
         roman_to_chords("I V", "C", "major pentatonic")
@@ -219,6 +258,28 @@ def test_degrees_to_chords_warns_but_keeps_positions():
     assert len(degrees_to_chords("C", "major", "V6 I")["warnings"]) == 1          # ignored inversion
     assert len(degrees_to_chords("A", "harmonic minor", "VII")["warnings"]) == 1  # VII reads G, got G#dim
     assert degrees_to_chords("C", "major pentatonic", "V7")["warnings"]          # non-heptatonic suffix
+
+
+def test_degrees_to_chords_warns_on_a_foreign_unnamed_marker():
+    # analyze_progression's 'ii?' / 'V?' (clusters) on degrees whose own chord is named: the '?' is reported
+    r = degrees_to_chords("C", "major", ["ii?", "V?", "I"])
+    assert r["symbols"] == ["Dm", "G", "C"] and len(r["warnings"]) == 2
+    assert all("'?' marks an unnamed chord" in w for w in r["warnings"])
+    for token in ("V65?", "V°?", "Vsus4?", "iv?"):                 # a '?' no longer silences the rest
+        assert len(degrees_to_chords("C", "major", [token])["warnings"]) == 1, token
+    # diatonic_chords' own marker on a degree whose stacked chord is unnamed stays silent
+    assert degrees_to_chords("C", "double harmonic", ["V?", "VII?"])["warnings"] == []
+    assert degrees_to_chords("C", "major pentatonic", ["V?"])["warnings"] == []
+
+
+@pytest.mark.parametrize("scale", HEPTATONIC)
+def test_unnamed_marker_warns_exactly_on_named_degrees(scale):
+    for tonic in ("C", "F#", "Bb", "Eb"):
+        rows = diatonic_chords(tonic, scale)["chords"]
+        tokens = [re.match(r"^[#b]*[IViv]+", c["roman"]).group(0) + "?" for c in rows]
+        warnings = degrees_to_chords(tonic, scale, tokens)["warnings"]
+        named = [c for c in rows if "?" not in c["roman"]]
+        assert len(warnings) == len(named), (scale, tonic)
 
 
 # -------------------------------------------------------------- shared helpers
@@ -289,6 +350,56 @@ def test_applied_reading():
         for c in roman_to_chords("V7/ii V/V vii°7/V viiø7/vi V7/IV V9/iii", key)["chords"]:
             got = applied_reading(c["symbol"], key)
             assert sym(got["applied"], key) == c["symbol"], (key, c["token"])
+
+
+def test_applied_target_is_the_chord_its_numeral_names():
+    # C enigmatic's degree 2 (Db F# A#) only reads as F#/Db, and hungarian major's degree 5 as D#/G:
+    # neither is a target, so C# is not 'V/bII' (whose V is Ab) nor A# 'V/v' (whose V is D)
+    assert applied_reading("C#", "C", "enigmatic") is None
+    assert applied_reading("E#dim", "C", "enigmatic") is None
+    assert applied_reading("A#7", "C", "hungarian major") is None
+    assert applied_reading("A7", "C")["applied"] == "V7/ii"          # an ordinary target still is one
+
+
+@pytest.mark.parametrize("scale", HEPTATONIC)
+def test_applied_readings_round_trip_in_every_mode(scale):
+    """Every applied label realizes the chord it was read from (the same root and pitch classes)."""
+    symbols = [f"{letter}{acc}{q}" for letter in "CDEFGAB" for acc in ("", "#", "b")
+               for q in ("", "9", "dim", "m7b5")]
+    for tonic in ("C", "F#", "Bb", "Eb"):   # all 14 tonics: test_harmony_ext's roman_figured sweep
+        for s in symbols:
+            got = applied_reading(s, tonic, scale)
+            if not got or not got.get("applied"):
+                continue
+            back = chord(got["applied"], tonic, scale)
+            want = read_chord(s)
+            assert pc(back["root"]) == want["root"].pitch_class, (scale, tonic, s, got["applied"])
+            assert sorted(map(pc, back["notes"])) == sorted(n.pitch_class for n in want["notes"]), (scale, s)
+
+
+def test_read_chord_restores_an_omitted_fifth():
+    g7 = read_chord(["G4", "B3", "F3", "G2"])                       # bach_chorale_voicing's fifthless V7
+    assert (g7["root"].name, g7["chord_type"].name, g7["omitted_fifth"].name) == ("G", "dominant 7", "D")
+    assert [n.name for n in g7["notes"]] == ["G", "B", "F"]        # the notes stay as written
+    assert read_chord(["D3", "F3", "C4"])["chord_type"].name == "minor 7"     # shell voicings
+    assert read_chord(["C3", "B3", "E4"])["chord_type"].name == "major 7"
+    assert read_chord(["C3", "C4", "E4", "C5"])["chord_type"].name == "major"
+    assert read_chord(["Ab", "C", "Gb"])["chord_type"].name == "dominant 7"   # spelled as Ab7 less its 5th
+    for unread in (["Ab", "C", "F#"], ["C", "Db", "D"], ["F3", "A3", "B3", "E4"], ["G", "B", "Db"]):
+        r = read_chord(unread)                                       # It6, a cluster, a rootless voicing
+        assert r["root"] is None and "omitted_fifth" not in r, unread
+    assert "omitted_fifth" not in read_chord(["G", "B", "D", "F"])  # a table chord is read as it is
+
+
+@pytest.mark.parametrize("tonic", TONICS)
+def test_omitted_fifth_reading_in_every_key(tonic):
+    for token in ("V7", "ii7", "IΔ7", "I", "vi", "V7/V", "iv"):
+        full = chord(token, tonic)
+        root = next(n for n in full["notes"] if n == full["root"])
+        fifth = full["notes"][2]
+        r = read_chord([root] + [n for n in full["notes"] if n not in (root, fifth)])
+        assert r["root"].name == full["root"] and r["chord_type"].name == full["chord_type"], (tonic, token)
+        assert r["omitted_fifth"].name == fifth, (tonic, token)
 
 
 def test_special_reading():
@@ -443,7 +554,9 @@ def test_progression_examples():
     assert progression_library("lament", root="A")["bass"] == ["A", "G", "F", "E"]
     assert progression_library("pop_axis", root="C")["chords"] == ["C", "G", "Am", "F"]
     assert progression_library("twelve_bar_blues", root="A")["chords"][4] == "D7"
-    assert "melody" not in progression_library("fonte", root="C")
+    # Gjerdingen's Fonte melody is diatonic: a local 4-3 in ii, then in I (5-4-4-3 in the home key)
+    assert progression_library("fonte", root="C")["melody"] == ["G", "F", "F", "E"]
+    assert "melody" not in progression_library("monte", root="C")     # the Monte's melody is chromatic
 
 
 def test_progression_lookup():
@@ -480,8 +593,62 @@ def test_schema_melodies_are_chord_tones():
 def test_progression_mode_mismatch_warns():
     e = progression_library("andalusian", root="C", scale_type="major")
     assert "warning" in e and e["key"] == "C major"
-    assert "warning" not in progression_library("andalusian", root="D", scale_type="dorian")
+    # dorian is a minor mode, but its own degree 6 turns VI into B major (D#, F#): that is said too
+    dorian = progression_library("andalusian", root="D", scale_type="dorian")
+    assert dorian["chords"] == ["Dm", "C", "B", "A"] and "minor-mode" not in dorian["warning"]
+    assert "VI = B (D#, F#)" in dorian["warning"]
+    assert "warning" not in progression_library("folia", root="D", scale_type="aeolian")   # its home mode
     assert "warning" in progression_library("pop_axis", root="A", scale_type="natural minor")
+
+
+def test_fenaroli_follows_gjerdingen():
+    # Gjerdingen, App. A: bass 7-1-2-3 against melody 4-3-7-1, sonorities 6/5/3, 5/3, 6/3, 6/3
+    e = progression_library("fenaroli", root="C")
+    assert e["numerals"] == "V65 I vii°6 I6"
+    assert e["chords"] == ["G7/B", "C", "Bdim/D", "C/E"] and e["bass"] == ["B", "C", "D", "E"]
+    assert e["bass_degrees"] == [7, 1, 2, 3] and e["melody"] == ["F", "E", "B", "C"]
+    figures = [c["figure"] for c in harmony.analyze_progression(e["chords"], "C")["chords"]]
+    assert figures == ["65", "", "6", "6"]                           # it ends on a 6/3, never a root-position I
+
+
+@pytest.mark.parametrize("tonic", TONICS)
+def test_schema_melodies_are_chord_tones_in_every_key(tonic):
+    for name, spec in PROGRESSIONS.items():
+        if spec[7] is None:
+            continue
+        e = progression_library(name, root=tonic)
+        assert "warning" not in e, (name, tonic)
+        for symbol, note in zip(e["chords"], e["melody"], strict=True):
+            assert pc(note) in {t.pitch_class for t in _parse_chord_list([symbol])[0]["tones"]}, (name, tonic)
+
+
+def test_schema_in_another_scale_never_contradicts_itself():
+    lydian = progression_library("prinner", root="C", scale_type="lydian")
+    assert lydian["chords"] == ["F#", "C/E", "Bdim/D", "C"] and "melody" not in lydian
+    assert "IV = F# (A#, C#)" in lydian["warning"] and "melody withheld" in lydian["warning"]
+    mixo = progression_library("meyer", root="C", scale_type="mixolydian")
+    assert "not bass_degrees read in C mixolydian (C D Bb C)" in mixo["warning"] and "melody" not in mixo
+    minor = progression_library("prinner", root="A", scale_type="natural minor")
+    assert minor["warning"].startswith("prinner is a major-mode progression") and "melody" not in minor
+    assert "warning" not in progression_library("prinner", root="C", scale_type="ionian")
+
+
+@pytest.mark.parametrize("scale", HEPTATONIC)
+def test_schemas_in_every_scale_give_one_texture_or_a_warning(scale):
+    """Chords, bass and melody agree (melody = chord tones, bass = bass_degrees in the scale) or a warning says why."""
+    for tonic in ("C", "F#", "Bb", "E"):
+        notes = scale_notes(resolve_scale_type(scale), parse_note(tonic))
+        for name, spec in PROGRESSIONS.items():
+            if spec[2] != "schema":
+                continue
+            e = progression_library(name, root=tonic, scale_type=scale)
+            for token, note in zip(e["numerals"].split(), e.get("melody", [])):
+                assert pc(note) in map(pc, chord(token, tonic, scale)["notes"]), (scale, tonic, name)
+            if spec[7] is not None and "melody" not in e:
+                assert "melody withheld" in e["warning"], (scale, tonic, name)
+            want = [(notes[int(str(d).lstrip("#b")) - 1].pitch_class + str(d).count("#") - str(d).count("b")) % 12
+                    for d in e["bass_degrees"]]
+            assert [pc(b) for b in e["bass"]] == want or "not bass_degrees" in e.get("warning", ""), (scale, name)
 
 
 def test_progression_library_errors():

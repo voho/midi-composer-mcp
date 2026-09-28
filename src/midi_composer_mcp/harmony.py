@@ -25,7 +25,10 @@ from .notes import (
     LETTER_PCS, LETTERS, Note, best_spelling, parse_note, parse_notes, spell_pitch_class,
     spelling_for_pcs, transpose,
 )
-from .roman import _MINOR_MODES, applied_reading, figure_for_bass, read_chord, roman_to_chords, special_reading
+from .roman import (
+    _MINOR_MODES, applied_reading, applied_target_row, figure_for_bass, read_chord, roman_to_chords,
+    special_reading,
+)
 from .scales import MAJOR_DEGREES, resolve_scale_type, scale_notes
 
 # ---------------------------------------------------------------- intervals
@@ -201,7 +204,13 @@ def analyze_progression(chords, root: str, scale_type: str = "major") -> dict:
     `non_scale_notes` are listed (a note array keeps its written spelling).
     Numerals follow the chord's spelling (Gb in C = bV, F# = #IV). A note
     array's bass is its lowest note when every note has an octave, otherwise its
-    first note (bach_chorale_voicing's convention).
+    first note (bach_chorale_voicing's convention). A note array that no table
+    chord matches is read with its omitted fifth restored when that spells a
+    triad or seventh chord (G2 B3 F3 G4 = V7, D F C = ii7, C E = I: the
+    omission four-part writing allows — bach_chorale_voicing's fifthless V7,
+    voice_chords' shell voicings — read as find_cadences and
+    check_voice_leading read it); the entry then has omitted_fifth (the
+    restored note), and in_key and non_scale_notes judge the whole chord.
 
     Each chord also gets:
     - figure: the bass as a chord member (music21's shorthand): '' / '6' / '64'
@@ -210,11 +219,19 @@ def analyze_progression(chords, root: str, scale_type: str = "major") -> dict:
       and unknown clusters get null plus bass_degree (4, or '#4' off the scale).
     - roman_figured: the numeral as roman_to_chords reads it back — 'I6', 'V65',
       'viiø43', 'V65/ii', 'N6', 'Ger65', 'Cad64'; in minor keys the textbook
-      numerals (A minor: F = VI, G = VII, G#dim = vii°, Fm = bvi).
+      numerals (A minor: F = VI, G = VII, G#dim = vii°, Fm = bvi). It carries
+      no bass the figure grammar cannot write: when figure is null and the bass
+      is not the root (Cadd9/E, Gsus4/C, a pedal G/C, Dm/G) it is the
+      root-position numeral ('Iadd9', 'Vsus4', 'V', 'ii') and bass_degree
+      holds the bass — re-add it as a slash when moving the draft to another
+      key. Null for a root or a chord that dialect cannot write (an unnamed
+      cluster such as C Db D or G B Db, whose `roman` keeps its '?' marker).
     - applied (only for chords not in the key): 'V<suffix>/x' for a major or
       dominant-family chord a spelled P5 above, 'vii°/x' / 'vii°7/x' / 'viiø7/x'
       for a dim / dim7 / m7b5 chord a spelled m2 below, a diatonic major or
-      minor triad x other than the tonic (A7 in C = V7/ii; Kostka & Payne). In
+      minor triad x other than the tonic, stacked on its own degree (A7 in C =
+      V7/ii; Kostka & Payne; a row an exotic mode only reads as another root's
+      inversion, like C enigmatic's F#/Db, is no target). In
       minor keys V and the raised-7th vii° chords get function_note
       'harmonic-minor dominant' instead.
     - special: 'Neapolitan' (a major triad on the lowered 2nd: N6, bII),
@@ -234,7 +251,8 @@ def analyze_progression(chords, root: str, scale_type: str = "major") -> dict:
     through roman_to_chords (IV/x, multi-level V/V/V and bII7/x chords read back
     as one applied level or as a chromatic chord); it is null for a root that
     dialect cannot write — one on the parallel major's degree that the key
-    lacks, like C#m in A minor. e.g. ['C','A7','Dm','G7/B','C'] in C -> roman
+    lacks, like C#m in A minor — and for an unnamed cluster. e.g.
+    ['C','A7','Dm','G7/B','C'] in C -> roman
     I VI7 ii V7 I, roman_figured I V7/ii ii V65 I. Deterministic.
     """
     scale = resolve_scale_type(scale_type)
@@ -297,9 +315,11 @@ def analyze_progression(chords, root: str, scale_type: str = "major") -> dict:
             entry["note"] = "chromatic / borrowed"
 
         # --- figures, applied chords, specials, borrowing (the shared roman.py rules)
+        if "omitted_fifth" in r:  # a note array read with its omitted fifth restored (read_chord)
+            entry["omitted_fifth"] = r["omitted_fifth"].pitch_class_name
         figure = figure_for_bass(ctype, croot, bass) if ctype is not None else None
         prefix = _dialect_prefix(base, accidental, croot, tonic, scale, minor_third) if heptatonic else accidental
-        if prefix is None:  # roman_to_chords cannot write this root in this key
+        if prefix is None or ctype is None:  # roman_to_chords cannot write this root / this cluster
             roman_figured = None
         elif figure is not None and ctype.name in _FIGURE_MARKS:
             roman_figured = f"{prefix}{numeral}{_FIGURE_MARKS[ctype.name]}{figure}"
@@ -702,19 +722,31 @@ def next_chords(chords, root: str, scale_type: str = "major", sevenths: bool = F
     analyze_progression reads it; its numeral degree picks the table row (bVI ->
     VI, #iv° -> IV: a chromatic last chord uses the row of its root letter, and
     `last.note` says so). The key must have 7 notes. Tiers:
-    0 resolution — an applied chord's target first (A7 -> Dm in C);
+    0 resolution — an applied chord's target first (A7 -> Dm in C; only a
+      chord analyze_progression reads as applied, so never an augmented
+      sixth); after an augmented sixth (It6, Fr43, Ger65, Sw43 — Kostka &
+      Payne; Aldwell & Schachter) the major V on ^5 (V7 with `sevenths`) and
+      the cadential 6/4 ('Cad64', then V): V first after It6 and Fr43, Cad64
+      first after Ger65 and Sw43 (the German sixth usually goes through the
+      6/4 to avoid parallel fifths; the Swiss spelling is written for it);
     1 usual, 2 sometimes, 3 less often — the diatonic chords (triads, or
       sevenths with `sevenths`) on the degrees the row lists; in natural minor
       the harmonic-minor V and vii° (V7, vii°7) are added beside v and VII;
-    4 applied — V7/x for each diatonic major or minor target x (not I) in the
-      row's usual then sometimes lists, in the row's order (Kostka & Payne);
+    4 applied — V7/x for each diatonic major or minor target x (not I, and
+      stacked on its own degree) in the row's usual then sometimes lists, in
+      the row's order (Kostka & Payne);
     5 mixture — major keys only (empty in minor and modal keys): Aldwell &
       Schachter's parallel-minor chords ii°, bIII, iv, bVI (with sevenths iiø7,
       bIII, iv7, bVI and vii°7) plus bVII (bVII7), which is the pop/jazz
       modal-interchange convention (Berklee), not A&S; ordered by the table
       tier of their degree;
     6 unlisted — a mixture chord whose degree the row does not list (I -> bVII).
-    Each candidate: symbol, token (roman_to_chords' dialect; it round-trips),
+    The last chord itself is never a candidate: a repetition is not a root
+    progression (Piston's table lists no degree after itself), so after A7 or
+    Fm the applied and mixture tiers leave it out.
+    Each candidate: symbol, token (roman_to_chords' dialect; it round-trips —
+    null for a stacked chord that dialect cannot write, such as the note array
+    G B Db on V of C double harmonic, whose symbol still chains),
     roman (analyze_progression's), notes, tier, tier_name, rule (the table row
     it comes from), common_tones with the last chord, root_motion (Schoenberg's
     classes, as schoenberg_progressions: 'ascending (strong)', 'descending',
@@ -758,13 +790,31 @@ def next_chords(chords, root: str, scale_type: str = "major", sevenths: bool = F
     row = PISTON_1941[degree - 1]
     row_tiers = {_ROMAN_BASE.index(n) + 1: tier for tier in (1, 2, 3) for n in row[tier]}
     last_pcs = {n.pitch_class for n in last_reading["notes"]} | {last_reading["bass"].pitch_class}
+    # the last chord as a whole (a restored omitted fifth included): never offered again
+    whole = last_pcs | ({last_reading["omitted_fifth"].pitch_class} if "omitted_fifth" in last_reading else set())
+    last_key = (last_root.pitch_class, frozenset(whole))
 
     raw: list[dict] = []
     diatonic = diatonic_chords(key, scale.name, sevenths)["chords"]
-    applied = applied_reading(last_reading, tonic, scale.name)
+    # tier 0 follows analyze_progression's reading: an augmented sixth is no applied chord
+    applied = applied_reading(last_reading, tonic, scale.name) if last.get("applied") else None
     if applied is not None and applied.get("applied"):
         raw.append({"symbol": diatonic[applied["target_degree"] - 1]["symbol"], "tier": 0,
                     "rule": "applied chord resolves to its target"})
+    if last.get("special") in _AUG_SIXTH_FIGURES:
+        # b6 and #4 expand outward to the octave on ^5: the major V, directly or through the Cad64
+        v_root = transpose(tonic, 7, 4)
+        v_symbol = f"{v_root.pitch_class_name}{'7' if sevenths else ''}"
+        cad64 = roman_to_chords(["Cad64"], key, scale.name)["symbols"][0]
+        to_v = {"symbol": v_symbol, "tier": 0,
+                "rule": "augmented sixth resolves to V: b6 and #4 expand outward to the octave on ^5"
+                        " (Kostka & Payne; Aldwell & Schachter)"}
+        to_cad = {"symbol": cad64, "tier": 0, "token": "Cad64",
+                  "rule": "augmented sixth to the cadential 6/4, then V (Kostka & Payne; Aldwell &"
+                          " Schachter: the German sixth's usual path, avoiding parallel fifths)"}
+        german = last["special"] in ("Ger65", "Sw43")
+        for order, c in enumerate((to_cad, to_v) if german else (to_v, to_cad)):
+            raw.append(dict(c, order=order))
     for deg, tier in row_tiers.items():
         raw.append({"symbol": diatonic[deg - 1]["symbol"], "tier": tier, "rule": _piston_rule(row, tier)})
     if scale.name == "natural minor":  # the minor mode's own dominant, with the raised leading tone
@@ -780,7 +830,7 @@ def next_chords(chords, root: str, scale_type: str = "major", sevenths: bool = F
         for tier in (1, 2):
             for numeral in row[tier]:
                 x = triads[_ROMAN_BASE.index(numeral)]
-                if x["degree"] == 1 or x["chord_type"] not in ("major", "minor"):
+                if not applied_target_row(x):  # the targets applied_reading accepts
                     continue
                 target = re.match(r"^[#b]*[IViv]+", x["roman"]).group(0)  # as applied_reading names it
                 token = f"V7/{target}"
@@ -837,20 +887,25 @@ def next_chords(chords, root: str, scale_type: str = "major", sevenths: bool = F
             "_ptier": c.get("ptier", 0),
         })
 
-    def rule_order(c):
-        if c["tier"] == 4:
-            return (4, c["_order"])
-        if c["tier"] == 5:
-            return (5, c["_ptier"], -c["common_tones"], c["_degree"], c["token"])
-        return (c["tier"], -c["common_tones"], c["_degree"], c["token"])
+    def text(c):  # a null token (an unwritable stacked chord) sorts by its notes
+        return c["token"] if c["token"] is not None else " ".join(c["notes"])
 
-    ranked, seen = [], set()
+    def rule_order(c):
+        if c["tier"] in (0, 4):
+            return (c["tier"], c["_order"])
+        if c["tier"] == 5:
+            return (5, c["_ptier"], -c["common_tones"], c["_degree"], text(c))
+        return (c["tier"], -c["common_tones"], c["_degree"], text(c))
+
+    # the last chord is no candidate (a repetition is no root progression); a chord listed
+    # twice keeps its best entry
+    ranked, seen = [], {last_key}
     for c in sorted(candidates, key=rule_order):
-        if c["_key"] not in seen:  # the same chord twice keeps its best entry
+        if c["_key"] not in seen:
             seen.add(c["_key"])
             ranked.append(c)
     if sort == "movement":
-        ranked.sort(key=lambda c: (c["movement"], c["tier"], c["token"]))
+        ranked.sort(key=lambda c: (c["movement"], c["tier"], text(c)))
     ranked = [{k: v for k, v in c.items() if not k.startswith("_")} for c in ranked[:limit]]
 
     last_out = {"symbol": last["symbol"], "roman": last["roman"], "degree": degree}
