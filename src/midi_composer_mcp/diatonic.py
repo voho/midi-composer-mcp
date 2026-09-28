@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 
-from .chords import ChordType, identify_chord_quality, match_chords
+from .chords import CHORDS, ChordType, identify_chord_quality, match_chords
 from .notes import LETTERS, Note, parse_note, parse_notes, transpose
 from .scales import MAJOR_DEGREES, ScaleType, degree_labels, resolve_scale_type, scale_notes
 
@@ -425,4 +425,302 @@ def degrees_to_chords(root: str, scale_type: str, degrees, sevenths: bool = Fals
         "chords": progression,
         "symbols": [c["symbol"] for c in progression],
         "warnings": warnings,
+    }
+
+
+# ------------------------------------------------------------ chord palette
+
+_ROMAN_NOTE = ("roman_to_chords reads {roman!r} in {key} as {got}, not {symbol}: palette numerals are"
+               " measured from the parallel major, but in this key a numeral without an accidental names"
+               " the key's own degree (in minor, ^6/^7 follow the chord's third) and the dialect has no"
+               " natural sign. Read the tokens in {tonic} major (roman_to_chords(tokens, '{tonic}',"
+               " 'major')) or use the symbol")
+
+
+def _flag_home_misreadings(entries: list[dict], tonic: Note, home: ScaleType) -> None:
+    """Add `roman_note` to every entry whose roman reads back as other notes in the home key.
+
+    Palette numerals are measured from the parallel major (dialect rule a), so they
+    always read back in `roman_to_chords(tokens, tonic, 'major')`. In another home
+    mode a bare numeral names the home scale's own degree (and in natural, harmonic
+    and melodic minor ^6/^7 follow the chord's third), so a borrowed Em in C minor
+    ('iii') or F#sus4 in A minor ('VIsus4') cannot be written in that key at all.
+    roman_to_chords itself decides; '?' tokens (no table chord) are not numerals it reads.
+    """
+    from .roman import roman_to_chords  # roman imports this module at load time
+
+    readable = [e for e in entries if "?" not in e["roman"]]
+    if not readable:
+        return
+    readings = roman_to_chords([e["roman"] for e in readable], tonic.name, home.name)["chords"]
+    for e, got in zip(readable, readings):
+        want = {parse_note(n).pitch_class for n in e["notes"]}
+        if {parse_note(n).pitch_class for n in got["notes"]} == want:
+            continue
+        label = got["symbol"] if isinstance(got["symbol"], str) else " ".join(got["symbol"])
+        e["roman_note"] = _ROMAN_NOTE.format(roman=e["roman"], key=f"{tonic.pitch_class_name} {home.name}",
+                                             got=label, symbol=e["symbol"], tonic=tonic.pitch_class_name)
+
+
+def _check_bool(name: str, value) -> None:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be true or false, got {value!r}")
+
+
+def _chord_family(ctype: ChordType | None, root: Note, notes: list[Note]) -> str:
+    """Klimper's colour family, read by letters + semitones (never semitones alone).
+
+    'major': a major 3rd, no minor 3rd, a perfect or absent 5th; 'minor': likewise
+    with a minor 3rd; anything else (dim, aug, sus, power, b5/#5 chords) 'other'.
+    A table chord is read from its own degree labels (so 7#9's #9 is a ninth, not a
+    minor third); an unnamed stacked chord from its spelled notes.
+    """
+    if ctype is not None:
+        labels = [label for label, _ in ctype.degrees]
+    else:
+        labels = []
+        for n in notes[1:]:
+            steps = (LETTERS.index(n.letter) - LETTERS.index(root.letter)) % 7
+            semis = (n.pitch_class - root.pitch_class) % 12
+            if steps == 2:
+                labels.append({4: "3", 3: "b3"}.get(semis, "x3"))
+            elif steps == 4:
+                labels.append("5" if semis == 7 else "x5")
+    thirds = {label for label in labels if label.lstrip("#bx") == "3"}
+    fifths = {label for label in labels if label.lstrip("#bx") == "5"}
+    if fifths - {"5"}:
+        return "other"
+    if thirds == {"3"}:
+        return "major"
+    if thirds == {"b3"}:
+        return "minor"
+    return "other"
+
+
+def _palette_universe(tonic: Note, scale: ScaleType, extended: bool, sevenths: bool,
+                      sizes: frozenset[int]) -> list[dict]:
+    """U(tonic, scale): the raw palette members of one source scale, in scale order.
+
+    Each member is {root, ctype (None for an unnamed stacked chord), notes (spelled as
+    the scale spells them, root first), degree, core, stacked_roman}. `stacked_roman`
+    is diatonic_chords' own numeral when it wrote this chord on its root (else None).
+    """
+    degrees = scale_notes(scale, tonic)[:-1]
+    spelled = {n.pitch_class: n for n in degrees}
+    position = {n.pitch_class: i + 1 for i, n in enumerate(degrees)}
+    members: list[dict] = []
+    core: dict[tuple[int, str], str | None] = {}
+    for c in diatonic_chords(tonic.name, scale.name, sevenths)["chords"]:
+        if not isinstance(c["symbol"], str):  # no table chord: keep the stacked notes as they are
+            members.append({"root": parse_note(c["root"]), "ctype": None,
+                            "notes": [parse_note(n) for n in c["notes"]],
+                            "degree": c["degree"], "core": True, "stacked_roman": c.get("roman")})
+            continue
+        ctype = CHORDS[c["chord_type"]]
+        root = spelled[parse_note(c["root"]).pitch_class]
+        key = (root.pitch_class, ctype.name)
+        # an inversion (C major pentatonic's C E A = Am/C) is listed in root position, on its root;
+        # only a chord stacked on its own root keeps diatonic_chords' numeral
+        core[key] = core.get(key) or (c.get("roman") if "bass" not in c else None)
+        if not extended:
+            members.append({"root": root, "ctype": ctype,
+                            "notes": [spelled[(root.pitch_class + s) % 12] for s in ctype.intervals],
+                            "degree": position[root.pitch_class], "core": True,
+                            "stacked_roman": core[key]})
+    if extended:
+        for root in degrees:
+            for ctype in CHORDS.values():
+                if len(ctype.intervals) not in sizes:
+                    continue
+                pcs = [(root.pitch_class + s) % 12 for s in ctype.intervals]
+                if not all(pc in spelled for pc in pcs):
+                    continue
+                key = (root.pitch_class, ctype.name)
+                members.append({"root": root, "ctype": ctype, "notes": [spelled[pc] for pc in pcs],
+                                "degree": position[root.pitch_class], "core": key in core,
+                                "stacked_roman": core.get(key)})
+    return members
+
+
+def chord_palette(root: str, scale_type: str = "major", extended: bool = False, sevenths: bool = False,
+                  max_notes: int = 4, include_dyads: bool = False, borrow: bool = False,
+                  source_modes=None, fifths_steps: int = 0, limit: int = 0) -> dict:
+    """Every chord that fits a key, plus (optionally) chords borrowed from parallel modes and neighbour keys.
+
+    One rule for both halves, pure set arithmetic (nothing is ranked by taste):
+
+    - UNIVERSE U(tonic, mode): with extended=false the stacked-thirds chords
+      diatonic_chords builds (triads, or sevenths with `sevenths`); a stacked
+      chord diatonic_chords names as an inversion (C major pentatonic's C E A =
+      Am/C) is listed in root position, and a stacked set that is no table chord
+      stays a note list. With extended=true every chord type of the chord table
+      with 3..max_notes notes (max_notes 3-6; the 2-note power chord only with
+      include_dyads), rooted on every scale note, kept iff its pitch classes all
+      lie in the scale. Notes are spelled as the scale spells them.
+    - IN-KEY entries = U(root, scale_type). Any scale works (pentatonic, symmetric...).
+    - BORROWED entries come from `source_modes` (a name or list) if given, else
+      with borrow=true from PARALLEL_MODES minus the home mode, plus with
+      `fifths_steps` n (0-6) the same mode on the keys 1..n steps round the
+      circle (+1, -1, +2, -2 ...) — the sources of borrowing_sources. From each
+      source S the U(S) chords with at least one tone outside the home scale
+      are kept (so chords the home key already has are dropped). Borrowing
+      needs a 7-note home, and every source mode must be a 7-note scale.
+
+    Entry fields: symbol, root, notes, chord_type, size, degree (of the root in
+    its source scale), family ('major' | 'minor' | 'other' — Klimper's green /
+    purple / grey), core (the stacked chord diatonic_chords builds on that
+    degree), roman against the HOME tonic (7-note homes only: a same-tonic
+    stacked chord keeps diatonic_chords' numeral, measured from the parallel
+    major — 'bVI', 'iv', 'bIII+', '#iv°' — anything else is numeral_base +
+    roman_suffix; '?' marks an unnamed stacked chord. Every other roman reads
+    back through roman_to_chords(tokens, root, 'major'), and through
+    roman_to_chords in the home key too unless the entry carries `roman_note`:
+    in a non-major home a numeral without an accidental names the home's own
+    degree and the dialect has no natural sign, so e.g. Em borrowed into C
+    minor ('iii') would come back as Ebm), degree_function (tonic / subdominant / dominant of that degree in its
+    source, 7-note homes only), in_key, source ('C major', 'C dorian', 'G
+    major'), distance (0 in key; else how many of the source's pitch classes lie
+    outside the home scale, |k| for a key k steps away), non_home_notes,
+    same_notes_as (earlier palette symbols with the identical pitch-class set:
+    C6 ~ Am7, Csus2 ~ Gsus4) and sources (every considered source, the home
+    included, whose scale holds the chord — borrowed_sources, sorted by distance
+    then source order; Scaler's 'shared scales').
+
+    Order ('sorted by complexity'): in-key first by (size, degree, harmonize_melody's
+    type preference, chord-table order), then borrowed by (distance, source
+    order, degree, size, type preference, table order). A repeat (same root pitch
+    class + chord type) keeps its first entry. `limit` > 0 truncates the lists;
+    count and borrowed_count are the totals. Returns {key, count,
+    borrowed_count, chords, symbols, tokens (the romans; empty for a home that
+    is not a 7-note scale)}.
+
+    The in-key palette is set membership over the chord table, presented as in
+    the Klimper 2 chords manual (families, complexity order). Mixture from the
+    parallel minor follows Aldwell & Schachter and Kostka & Payne ('Mode
+    Mixture'); borrowing from the other modes is Berklee modal interchange
+    (Nettles & Graf, The Chord Scale Theory & Jazz Harmony, 1997); neighbour
+    keys follow the circle of fifths. e.g. chord_palette('C') -> C Dm Em F G Am
+    Bdim; chord_palette('C', borrow=True) adds D F#dim Bm (lydian), Edim Gm Bb
+    (mixolydian), Cm Ebaug Adim (melodic minor), Ddim Fm Abaug (harmonic major),
+    Eb (dorian), Ab (harmonic minor), Db Gdim Bbm (phrygian), Cdim Ebm Gb
+    (locrian). Deterministic.
+    """
+    from .harmony import _TYPE_PREF  # harmony imports this module at load time
+
+    if not isinstance(root, str):
+        raise ValueError(f"root must be a note name like 'C' or 'F#', got {root!r}")
+    parsed = parse_notes(root)
+    if len(parsed) != 1:
+        raise ValueError(f"root must be a single note name like 'C' or 'F#', got {root!r}")
+    tonic = parsed[0].without_octave()
+    home = resolve_scale_type(scale_type)
+    for name, value in (("extended", extended), ("sevenths", sevenths), ("include_dyads", include_dyads),
+                        ("borrow", borrow)):
+        _check_bool(name, value)
+    if not isinstance(max_notes, int) or isinstance(max_notes, bool) or not 3 <= max_notes <= 6:
+        raise ValueError(f"max_notes must be an integer between 3 and 6, got {max_notes!r}")
+    if not isinstance(fifths_steps, int) or isinstance(fifths_steps, bool) or not 0 <= fifths_steps <= 6:
+        raise ValueError(f"fifths_steps must be an integer between 0 and 6, got {fifths_steps!r}")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+        raise ValueError(f"limit must be a non-negative integer (0 = all), got {limit!r}")
+
+    if source_modes is not None:
+        modes = [source_modes] if isinstance(source_modes, str) else source_modes
+        if not isinstance(modes, (list, tuple)):
+            raise ValueError(f"source_modes must be a scale name or a list of scale names, got {source_modes!r}")
+        for mode in modes:
+            if not isinstance(mode, str):
+                raise ValueError(f"source_modes must be scale names, got {mode!r}")
+            scale = resolve_scale_type(mode)
+            if len(scale.intervals) != 7:
+                raise ValueError(f"Chords can only be borrowed from 7-note modes; {scale.name!r} has"
+                                 f" {len(scale.intervals)} notes")
+        modes = list(modes)
+    elif borrow:
+        modes = list(PARALLEL_MODES)
+    else:
+        modes = []
+    heptatonic = len(home.intervals) == 7
+    if (borrow or source_modes is not None or fifths_steps > 0) and not heptatonic:
+        raise ValueError(f"Borrowing needs a 7-note home scale; {home.name!r} has {len(home.intervals)}"
+                         f" notes (use extended=true for its full in-key palette)")
+
+    sizes = frozenset(range(3, max_notes + 1)) | (frozenset({2}) if include_dyads else frozenset())
+    sources = borrowing_sources(tonic, home.name, modes, fifths_steps, include_home=True)
+    home_pcs = sources[0]["pcs"]
+    table_order = {name: i for i, name in enumerate(CHORDS)}
+
+    raw = []
+    for index, src in enumerate(sources):
+        for m in _palette_universe(src["tonic"], src["scale"], extended, sevenths, sizes):
+            pcs = frozenset(n.pitch_class for n in m["notes"])
+            if index and pcs <= home_pcs:
+                continue  # the home key already has it
+            ctype = m["ctype"]
+            size = len(m["notes"])
+            pref = _TYPE_PREF.get(ctype.name, 99) if ctype else 100
+            order = table_order[ctype.name] if ctype else len(table_order)
+            sort = ((0, size, m["degree"], pref, order) if index == 0
+                    else (1, src["distance"], index, m["degree"], size, pref, order))
+            raw.append((sort, index, m, pcs))
+    raw.sort(key=lambda r: r[0])
+
+    key_name = f"{tonic.pitch_class_name} {home.name}"
+    seen: set = set()
+    by_pcs: dict[frozenset[int], list] = {}
+    chords: list[dict] = []
+    borrowed_count = 0
+    for _sort, index, m, pcs in raw:
+        croot, ctype, notes = m["root"], m["ctype"], m["notes"]
+        dedup = (croot.pitch_class, ctype.name) if ctype else (croot.pitch_class, None, pcs)
+        if dedup in seen:
+            continue  # the first entry's `sources` already lists every scale that holds it
+        seen.add(dedup)
+        src = sources[index]
+        symbol = f"{croot.pitch_class_name}{ctype.symbol}" if ctype else [n.pitch_class_name for n in notes]
+        entry: dict = {
+            "symbol": symbol,
+            "root": croot.pitch_class_name,
+            "notes": [n.pitch_class_name for n in notes],
+            "chord_type": ctype.name if ctype else "unknown",
+            "size": len(notes),
+            "degree": m["degree"],
+            "family": _chord_family(ctype, croot, notes),
+            "core": m["core"],
+        }
+        if heptatonic:
+            rel = ctype.pitch_classes if ctype else frozenset(
+                (n.pitch_class - croot.pitch_class) % 12 for n in notes)
+            minor = 3 in rel and 4 not in rel
+            if m["stacked_roman"] is not None and src["tonic"] == tonic:
+                roman = m["stacked_roman"]
+            else:
+                base, accidental = numeral_base(croot, tonic)
+                roman = f"{accidental}{base.lower() if minor else base}{roman_suffix(ctype, minor)}"
+            entry["roman"] = roman
+            entry["degree_function"] = _HARMONIC_FUNCTIONS[m["degree"] - 1]
+        entry["in_key"] = index == 0
+        entry["source"] = src["label"]
+        entry["distance"] = src["distance"]
+        outside: list[str] = []
+        for n in notes:
+            if n.pitch_class not in home_pcs and n.pitch_class_name not in outside:
+                outside.append(n.pitch_class_name)
+        entry["non_home_notes"] = outside
+        entry["same_notes_as"] = list(by_pcs.get(pcs, []))
+        entry["sources"] = borrowed_sources(notes, tonic, home.name, modes, fifths_steps, include_home=True)
+        by_pcs.setdefault(pcs, []).append(symbol)
+        borrowed_count += index != 0
+        chords.append(entry)
+
+    shown = chords[:limit] if limit else chords
+    if heptatonic:
+        _flag_home_misreadings(shown, tonic, home)
+    return {
+        "key": key_name,
+        "count": len(chords),
+        "borrowed_count": borrowed_count,
+        "chords": shown,
+        "symbols": [c["symbol"] for c in shown],
+        "tokens": [c["roman"] for c in shown] if heptatonic else [],
     }
