@@ -678,8 +678,9 @@ def plan_sections(form: str | list[str], bars: int | dict[str, int] = 8, beats_p
 
 @mcp.tool()
 def arrange_song(sections: dict, form: str | list[str] | None = None, tempo: int = 120,
-                 beats_per_bar: int = 4, step_beats: float = 0.5,
-                 file_name: str | None = None, output_dir: str | None = None) -> dict:
+                 beats_per_bar: int = 4, step_beats: float = 0.5, swing: float = 0.5,
+                 swing_unit: float = 0.5, file_name: str | None = None,
+                 output_dir: str | None = None) -> dict:
     """Assemble named sections (intro/verse/chorus/bridge/outro) into one whole-song MIDI.
 
     The capstone "build a whole song" tool. `sections` maps a section name to
@@ -691,13 +692,21 @@ def arrange_song(sections: dict, form: str | list[str] | None = None, tempo: int
     into one continuous MIDI track (so "bass" is a single track for the whole
     song; a part used only in the chorus simply rests elsewhere; a different
     `program` in a later section switches the instrument there). Name your
-    tracks; unnamed ones become 'notes' (or 'notes_1', 'notes_2'...). Compose each
-    layer with the scale/chord/melody/rhythm tools, drop them into sections, and
-    sequence — then midi_to_audio to hear it. Returns the file plus a section
-    timeline and per-track summary.
+    tracks; unnamed ones become 'notes' (or 'notes_1', 'notes_2'...). Chords
+    tracks take the same comping fields as in arrange_to_midi (durations,
+    rhythm, sustain, strum). `swing` (0.5 straight .. 2/3 triplet .. 0.75) and
+    `swing_unit` (0.25/0.5/1.0 beats) swing the whole song on its global grid, so
+    every section swings alike; a track's own "swing"/"swing_unit" overrides them.
+    Compose each layer with the scale/chord/melody/rhythm tools, drop them into
+    sections, and sequence — then midi_to_audio to hear it. Returns the file plus
+    a section timeline and per-track summary.
+    Example: sections={"verse": {"bars": 4, "tracks": [{"type": "chords", "name": "keys",
+    "chords": ["Am", "F", "C", "G"], "rhythm": "O.o.O.o.", "step_beats": 0.5}]}},
+    form="verse verse", swing=0.6667.
     """
     return _structure.render_song_structure(sections, form=form, tempo=tempo,
                                              beats_per_bar=beats_per_bar, step_beats=step_beats,
+                                             swing=swing, swing_unit=swing_unit,
                                              file_name=file_name, output_dir=output_dir)
 
 
@@ -708,8 +717,8 @@ def notes_to_midi(notes: str | list[str], rhythm: str | None = None,
                   step_beats: float = 0.5, tempo: int = 120, octave: int = 4,
                   octave_policy: str = "nearest", velocity: int = 90,
                   accent_velocity: int = 110, sustain: bool = False,
-                  program: int = 0, file_name: str | None = None,
-                  output_dir: str | None = None) -> dict:
+                  program: int = 0, swing: float = 0.5, swing_unit: float = 0.5,
+                  file_name: str | None = None, output_dir: str | None = None) -> dict:
     """Write a note sequence (scale, arpeggio or melody) to a single-track MIDI file.
 
     Plays the notes in order, one per `step_beats`. With `rhythm` (a pattern
@@ -718,38 +727,63 @@ def notes_to_midi(notes: str | list[str], rhythm: str | None = None,
     (notes are consumed in order and wrap around; with sustain=true pauses
     extend the previous note). Octave-less notes are placed by `octave_policy`:
     'nearest' for melodies, 'ascending' for scale runs. `program` is a General
-    MIDI instrument (0 piano, 24 guitar, 32 bass...). Returns the file path,
-    base64 and the exact note events written.
+    MIDI instrument (0 piano, 24 guitar, 32 bass...). `swing` is the DAW/MPC
+    swing ratio (0.5 straight, 0.6667 triplet swing, at most 0.75) applied to
+    pairs of `swing_unit`-beat steps (0.25, 0.5 or 1.0); on-beats never move.
+    E.g. eighths at 0, 0.5, 1, 1.5 with swing=0.6667 play at 0, 0.667, 1, 1.667.
+    Returns the file path, base64 and the exact note events written (swung times).
     """
     return _midi.render_notes(notes, rhythm=rhythm, step_beats=step_beats, tempo=tempo,
                               octave=octave, octave_policy=octave_policy,
                               velocity=velocity, accent_velocity=accent_velocity,
-                              sustain=sustain, program=program,
-                              file_name=file_name, output_dir=output_dir)
+                              sustain=sustain, program=program, swing=swing,
+                              swing_unit=swing_unit, file_name=file_name,
+                              output_dir=output_dir)
 
 
 @mcp.tool()
 def chords_to_midi(chords: str | list[str | list[str]], beats_per_chord: float = 4.0,
                    tempo: int = 120, octave: int = 4, arpeggiate: bool = False,
-                   velocity: int = 80, program: int = 0, file_name: str | None = None,
+                   velocity: int = 80, program: int = 0, durations: list[float] | None = None,
+                   rhythm: str | None = None, step_beats: float = 0.5, sustain: bool = False,
+                   accent_velocity: int = 100, strum: float = 0.0, strum_direction: str = "down",
+                   swing: float = 0.5, swing_unit: float = 0.5, file_name: str | None = None,
                    output_dir: str | None = None) -> dict:
-    """Write a chord sequence to a single-track MIDI file (block chords, or arpeggiated).
+    """Write a chord sequence to a single-track MIDI file (block chords, comped rhythm, strummed or arpeggiated).
 
     `chords` items are chord symbols ('C', 'Am7', 'F#dim', 'C/E', 'C4maj7' —
     e.g. the `symbols` output of degrees_to_chords) and/or explicit note
     arrays (['C','E','G'] or ['C4','E4','G4']). Octave-less chords are voiced
-    upward from `octave`. Each chord lasts `beats_per_chord`. Returns the file
-    path, base64 and each chord's voiced notes and MIDI numbers.
+    upward from `octave`. Each chord lasts `beats_per_chord`, or its entry in
+    `durations` (one number of beats per chord, 0.25-64: variable harmonic rhythm).
+    `rhythm` comps each chord with an O/o/. pattern on a `step_beats` grid: O strikes
+    the voicing at `accent_velocity`, o at `velocity`, . rests (with sustain=true it
+    holds the previous strike, never past the chord change). The pattern is either
+    one chord long (repeated for every chord) or the whole progression long.
+    `strum` (0-0.25 beats) delays each voice of a strike: 'down' from the lowest note,
+    'up' from the highest, 'alternate' down on even grid steps and up on odd ones;
+    voices end together. rhythm/strum cannot be combined with arpeggiate. `swing`
+    (0.5 straight, 0.6667 triplet, max 0.75) swings pairs of `swing_unit`-beat steps.
+    Example: chords=['Am','F','C','G'], beats_per_chord=2, step_beats=0.25,
+    rhythm='O..o..o.', strum=0.03 strikes each chord at beats 0, 0.75 and 1.5 of its
+    span (a tresillo stab); durations=[2,2,4,8] gives a 2+2+4+8-beat harmonic rhythm.
+    Returns the file path, base64 and each chord's voiced notes, MIDI numbers and span.
     """
     return _midi.render_chords(chords, beats_per_chord=beats_per_chord, tempo=tempo,
                                octave=octave, arpeggiate=arpeggiate, velocity=velocity,
-                               program=program, file_name=file_name, output_dir=output_dir)
+                               program=program, durations=durations, rhythm=rhythm,
+                               step_beats=step_beats, sustain=sustain,
+                               accent_velocity=accent_velocity, strum=strum,
+                               strum_direction=strum_direction, swing=swing,
+                               swing_unit=swing_unit, file_name=file_name,
+                               output_dir=output_dir)
 
 
 @mcp.tool()
 def drums_to_midi(lanes: dict[str, str], step_beats: float = 0.5, tempo: int = 120,
-                  velocity: int = 100, accent_velocity: int = 120,
-                  file_name: str | None = None, output_dir: str | None = None) -> dict:
+                  velocity: int = 100, accent_velocity: int = 120, swing: float = 0.5,
+                  swing_unit: float = 0.5, file_name: str | None = None,
+                  output_dir: str | None = None) -> dict:
     """Write a drum pattern to a single-track General MIDI percussion file.
 
     `lanes` maps a drum name to a rhythm pattern, e.g.
@@ -759,10 +793,14 @@ def drums_to_midi(lanes: dict[str, str], step_beats: float = 0.5, tempo: int = 1
     include kick, snare, side_stick, clap, closed_hat/open_hat/pedal_hat,
     low_tom/mid_tom/high_tom, crash, ride, tambourine, cowbell, clave, shaker,
     conga, bongo... (or a raw GM note number). Patterns from random_rhythm /
-    euclidean_rhythm work directly as lanes.
+    euclidean_rhythm work directly as lanes. `swing` (0.5 straight, 0.6667 triplet
+    shuffle, max 0.75) delays every second `swing_unit`-beat step (0.25 swung
+    sixteenths, 0.5 swung eighths, 1.0 swung quarters); on-beats never move.
+    Example: lanes={"hat": "oooooooo"}, swing=0.6667 gives a shuffled eighth hat.
     """
     return _midi.render_drums(lanes, step_beats=step_beats, tempo=tempo, velocity=velocity,
-                              accent_velocity=accent_velocity, file_name=file_name,
+                              accent_velocity=accent_velocity, swing=swing,
+                              swing_unit=swing_unit, file_name=file_name,
                               output_dir=output_dir)
 
 
@@ -775,15 +813,20 @@ def song_to_midi(melody_notes: str | list[str], chords: str | list[str | list[st
                  accent_velocity: int = 115, chord_velocity: int = 70,
                  sustain: bool = False, arpeggiate_chords: bool = False,
                  melody_program: int = 0, chord_program: int = 0,
+                 swing: float = 0.5, swing_unit: float = 0.5,
                  file_name: str | None = None, output_dir: str | None = None) -> dict:
     """Write a melody plus chord accompaniment into one two-track MIDI file.
 
-    A convenient shortcut for the common melody+chords case; for bass, drums
-    or more tracks use arrange_to_midi. Track 1 plays `melody_notes` (optionally
-    shaped by `melody_rhythm`, same rules as notes_to_midi); track 2 plays
-    `chords` (same formats as chords_to_midi), one every `beats_per_chord`.
-    Align lengths yourself: a melody over 4 chords of 4 beats at 0.5-beat steps
-    needs a 32-step rhythm. `*_program` numbers pick GM instruments.
+    A convenient shortcut for the common melody+chords case; for bass, drums,
+    comped/strummed chords or more tracks use arrange_to_midi. Track 1 plays
+    `melody_notes` (optionally shaped by `melody_rhythm`, same rules as
+    notes_to_midi); track 2 plays `chords` (same formats as chords_to_midi), one
+    every `beats_per_chord`. Align lengths yourself: a melody over 4 chords of 4
+    beats at 0.5-beat steps needs a 32-step rhythm. `*_program` numbers pick GM
+    instruments. `swing` (0.5 straight, 0.6667 triplet, max 0.75) swings both tracks
+    on pairs of `swing_unit`-beat steps (0.25, 0.5 or 1.0).
+    Example: melody_notes='E5 D5 C5 D5 E5 E5 E5 D5', chords=['C','G'],
+    beats_per_chord=2, swing=0.6667 gives a swung-eighths tune over C and G.
     """
     return _midi.render_song(melody_notes, chords, melody_rhythm=melody_rhythm,
                              step_beats=step_beats, beats_per_chord=beats_per_chord,
@@ -793,13 +836,14 @@ def song_to_midi(melody_notes: str | list[str], chords: str | list[str | list[st
                              chord_velocity=chord_velocity, sustain=sustain,
                              arpeggiate_chords=arpeggiate_chords,
                              melody_program=melody_program, chord_program=chord_program,
+                             swing=swing, swing_unit=swing_unit,
                              file_name=file_name, output_dir=output_dir)
 
 
 @mcp.tool()
 def arrange_to_midi(tracks: list[dict], tempo: int = 120, step_beats: float = 0.5,
-                    beats_per_chord: float = 4.0, file_name: str | None = None,
-                    output_dir: str | None = None) -> dict:
+                    beats_per_chord: float = 4.0, swing: float = 0.5, swing_unit: float = 0.5,
+                    file_name: str | None = None, output_dir: str | None = None) -> dict:
     """Render any number of fitting tracks into one multi-track MIDI file — the full arrangement.
 
     This is the capstone "idea -> song" tool. You assemble the parts (the
@@ -810,18 +854,32 @@ def arrange_to_midi(tracks: list[dict], tempo: int = 120, step_beats: float = 0.
                "program":0, "octave_policy":"nearest", "sustain":false}  (melody/bass/arp)
     - chords: {"type":"chords", "chords":["Am","F","C","G"], "beats_per_chord":4,
                "octave":4, "arpeggiate":false, "program":0}              (pads/comping)
+              comping fields: "durations":[2,2,4] (beats per chord, replaces
+              beats_per_chord), "rhythm":"O..o..o." (strikes on a "step_beats" grid,
+              one chord long or the whole track long; O at "accent_velocity" (100),
+              o at "velocity"), "sustain":true (rests hold the strike within its
+              chord), "strum":0.03 (beats between voices, max 0.25) with
+              "strum_direction":"down"|"up"|"alternate"
     - drums:  {"type":"drums", "lanes":{"kick":"O...O...","snare":"..O...O.","hat":"oooooooo"}}
 
     Shared per-track options: "name", "velocity", "start_beat" (beat offset for
-    intros/drops), "step_beats", "channel" (auto-assigned; drums forced to the
-    GM percussion channel). Align track lengths via start_beat and step counts.
-    Typical full arrangement: a chords track, a bass notes track (chord roots,
-    low octave, program 33), a melody notes track (program 0/80), and a drums
-    track. Returns the file path, base64 and a per-track summary.
+    intros/drops), "step_beats", "swing"/"swing_unit" (override the renderer's),
+    "channel" (auto-assigned; drums forced to the GM percussion channel). `swing`
+    (0.5 straight, 0.6667 triplet swing, max 0.75) swings pairs of `swing_unit`-beat
+    steps (0.25/0.5/1.0) on the absolute timeline, so offset tracks swing together.
+    Align track lengths via start_beat and step counts. Typical full arrangement:
+    a chords track, a bass notes track (chord roots, low octave, program 33), a
+    melody notes track (program 0/80), and a drums track. Render hints from
+    harmonize_melody/counterpoint/bach_chorale_voicing/phase_shift go straight in.
+    Example (reggae skank on the off-beats over a one-drop): tracks=[{"type":"chords",
+    "chords":["C","F"],"beats_per_chord":4,"step_beats":0.5,"rhythm":".o.o.o.o"},
+    {"type":"drums","step_beats":0.25,"lanes":{"kick":"........O...............O......."}}].
+    Returns the file path, base64 and a per-track summary (swung times reported).
     """
     return _midi.render_arrangement(tracks, tempo=tempo, step_beats=step_beats,
-                                    beats_per_chord=beats_per_chord,
-                                    file_name=file_name, output_dir=output_dir)
+                                    beats_per_chord=beats_per_chord, swing=swing,
+                                    swing_unit=swing_unit, file_name=file_name,
+                                    output_dir=output_dir)
 
 
 @mcp.tool()
