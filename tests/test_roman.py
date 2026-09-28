@@ -450,6 +450,84 @@ def test_borrowed_sources_rule():
         borrowed_sources([None], "C")
 
 
+def test_fifths_sources_keep_the_home_letters_and_name_each_scale_once():
+    cb = {s["label"]: s["tonic"].name for s in borrowing_sources("Cb", "major", modes=[], fifths_steps=1)}
+    assert cb == {"Gb major": "Gb", "E major": "Fb"}      # Fb major, labelled by its practical enharmonic
+    six = borrowing_sources("C", "major", modes=[], fifths_steps=6)
+    assert [s["label"] for s in six][-2:] == ["Db major", "F# major"]   # Gb major is F# major: listed once
+    assert six[-1]["tonic"].name == "F#" and six[-1]["distance"] == 6
+    # A# harmonic minor five fifths up would need triple sharps (G## harmonic minor): the practical key
+    assert borrowing_sources("A#", "harmonic minor", modes=[], fifths_steps=5)[-2]["tonic"].name == "A"
+
+
+@pytest.mark.parametrize("scale", ["major", "natural minor", "harmonic minor", "lydian", "dorian"])
+def test_six_fifths_reach_each_key_once_in_every_key(scale):
+    """The home plus 11 neighbour keys, each scale once; each tonic on the home's letter k fifths away."""
+    for tonic in TONICS + ["Cb", "D#"]:
+        sources = borrowing_sources(tonic, scale, modes=[], fifths_steps=6, include_home=True)
+        assert len(sources) == 12, (tonic, [s["label"] for s in sources])
+        assert len({(s["scale"].name, s["pcs"]) for s in sources}) == 12
+        assert len({s["label"] for s in sources}) == 12
+        home = LETTERS.index(parse_note(tonic).letter)
+        for s, k in zip(sources[1:], [1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6], strict=True):
+            assert s["distance"] == abs(k)
+            # beyond double accidentals the key is spelled practically: D# major's +6 would be G## major,
+            # Cb minor's (10 flats) -5 Dbb minor
+            if tonic != "D#" and not (tonic == "Cb" and scale.endswith("minor")):
+                assert s["tonic"].letter == LETTERS[(home + 4 * k) % 7], (tonic, scale, k, s["label"])
+
+
+def test_borrowed_sources_judge_letters_not_semitones():
+    """A mixture chord is built from the parallel mode's own spelled degrees (Aldwell & Schachter, Kostka &
+    Payne): G# B D# is no chord of C harmonic minor (it has Ab), E G# B none of C harmonic major (Ab)."""
+    for notes in (["G#", "B", "D#"], ["Ab", "Cb", "Eb"], ["G", "B", "D#"], ["E", "G#", "B"], ["E", "G#", "B", "D"],
+                  ["F#", "A#", "C#"], ["G#", "B#", "D#"]):
+        assert borrowed_sources(notes, "C") == [], notes
+    assert borrowed_sources([8, 11, 3], "C") == ["C harmonic minor"]    # bare pitch classes: nothing to spell
+    assert borrowed_sources(["Ab", "C", "Eb"], "C") == ["C harmonic minor", "C natural minor", "C phrygian",
+                                                        "C locrian"]
+    assert borrowed_sources(["Gb", "Bb", "Db"], "C") == ["C locrian"]
+    assert borrowed_sources(["Ab3", "C4", "Eb4"], "C") == borrowed_sources(["Ab", "C", "Eb"], "C")
+    # C# major's neighbour a fifth up is G# major (labelled by its practical name): it holds B#m, not Cm
+    assert borrowed_sources([parse_note("B#"), "D#", "F##"], "C#", modes=[], fifths_steps=1) == ["Ab major"]
+    assert borrowed_sources(["C", "Eb", "G"], "C#", modes=[], fifths_steps=1) == []
+    # roman_to_chords: an enharmonic misspelling of a mixture chord is 'chromatic', like VI7 (A7) always was
+    for token in ("V+", "III", "III7", "bvi", "#v", "#IV", "#V"):
+        c = chord(token)
+        assert c["kind"] == "chromatic" and "borrowed_from" not in c, token
+    rag = roman_to_chords(progression_library("ragtime", root="C")["numerals"], "C")["chords"]   # Levine
+    assert [(c["symbol"], c["kind"]) for c in rag] == [("E7", "chromatic"), ("A7", "chromatic"), ("D7", "borrowed"),
+                                                      ("G7", "diatonic"), ("C", "diatonic")]
+    # real mixture is untouched: the spelled answer is the pitch-class answer
+    for token in ("iv", "bVI", "bIII", "bVII", "ii°", "bII", "II", "v", "i°", "biii", "bV", "iiø7", "IV7"):
+        c = chord(token)
+        names = [c["bass"], *c["notes"]]
+        assert c["kind"] == "borrowed" and c["borrowed_from"] == borrowed_sources([pc(n) for n in names], "C"), token
+
+
+_MIXTURE_LINES = {
+    "major": "iv bVI bIII bVII ii° bII II v i° biii bV V+ III III7 bvi #v #IV #V VI7 #iv°7 iiø7 bVII7 IV7",
+    "natural minor": "V bII IV ii vi° #vi° vii° III+ bvii I iii V7 IV7 #iv° II",
+}
+
+
+@pytest.mark.parametrize("scale", list(_MIXTURE_LINES))
+@pytest.mark.parametrize("tonic", TONICS)
+def test_every_borrowed_from_source_spells_the_chord(scale, tonic):
+    """In every key: each credited source's own notes hold the chord's spelled notes, and the kinds and the
+    source modes are the ones C has."""
+    line = _MIXTURE_LINES[scale]
+    spelled = {s["label"]: {n.pitch_class_name for n in scale_notes(s["scale"], s["tonic"])}
+               for s in borrowing_sources(tonic, scale)}
+    ref = roman_to_chords(line, "C", scale)["chords"]
+    for a, b in zip(ref, roman_to_chords(line, tonic, scale)["chords"], strict=True):
+        assert b["kind"] == a["kind"], (tonic, scale, b["token"])
+        assert [s.split(" ", 1)[1] for s in b.get("borrowed_from", [])] == \
+               [s.split(" ", 1)[1] for s in a.get("borrowed_from", [])], (tonic, scale, b["token"])
+        for label in b.get("borrowed_from", []):
+            assert {b["bass"], *b["notes"]} <= spelled[label], (tonic, scale, b["token"], label)
+
+
 @pytest.mark.parametrize("tonic", TONICS)
 def test_borrowed_sources_are_key_relative(tonic):
     base = borrowed_sources(["F", "Ab", "C"], "C")

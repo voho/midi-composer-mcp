@@ -15,14 +15,15 @@ from midi_composer_mcp.diatonic import (
     PARALLEL_MODES,
     _chord_family,
     borrowed_sources,
+    borrowing_sources,
     chord_palette,
     diatonic_chords,
 )
 from midi_composer_mcp.harmony import voice_leading
 from midi_composer_mcp.midi_io import _parse_chord_list, render_chords
-from midi_composer_mcp.notes import LETTERS, parse_note
+from midi_composer_mcp.notes import LETTER_PCS, LETTERS, parse_note
 from midi_composer_mcp.roman import roman_to_chords
-from midi_composer_mcp.scales import SCALES, resolve_scale_type
+from midi_composer_mcp.scales import SCALES, resolve_scale_type, scale_notes
 
 TONICS = ["C", "G", "D", "A", "E", "B", "F#", "C#", "F", "Bb", "Eb", "Ab", "Db", "Gb"]
 HEPTATONIC = [s.name for s in SCALES.values() if len(s.intervals) == 7]
@@ -50,6 +51,24 @@ def by_symbol(palette: dict) -> dict:
 
 def scale_pcs(tonic: str, scale: str) -> frozenset[int]:
     return frozenset((pc(tonic) + i) % 12 for i in resolve_scale_type(scale).intervals)
+
+
+def misspelled_tones(c: dict) -> list[str]:
+    """Tones of a named entry that are not on their chord degree's letter above the root.
+
+    A tone may leave its letter only when that spelling would need more than a double accidental.
+    """
+    if c["chord_type"] == "unknown":
+        return []
+    root = parse_note(c["root"])
+    wrong = []
+    for (label, semis), name in zip(CHORDS[c["chord_type"]].degrees, c["notes"], strict=True):
+        letter = LETTERS[(LETTERS.index(root.letter) + int(label.lstrip("#b")) - 1) % 7]
+        note = parse_note(name)
+        needed = (root.pitch_class + semis - LETTER_PCS[letter] + 6) % 12 - 6
+        if note.letter != letter and abs(needed) <= 2:
+            wrong.append(name)
+    return wrong
 
 
 # --------------------------------------------------------------- spec examples
@@ -138,6 +157,76 @@ def test_fifths_steps_borrows_from_neighbour_keys():
     three = chord_palette("C", fifths_steps=3)
     assert [c["source"] for c in three["chords"][7:]][::3][:6] == [
         "G major", "F major", "D major", "Bb major", "A major", "Eb major"]
+
+
+def test_fifths_neighbours_keep_the_home_spelling():
+    """A neighbour key is spelled on the home tonic's letters (Cb major's is Fb major, not E major), so its
+    chords read the numerals they have in C; only the source label is the practical enharmonic key."""
+    def tail(p, start=7):
+        return [(c["symbol"], c["roman"], c["source"]) for c in p["chords"][start:]]
+
+    assert tail(chord_palette("Cb", fifths_steps=1)) == [
+        ("Bbm", "vii", "Gb major"), ("Db", "II", "Gb major"), ("Fdim", "#iv°", "Gb major"),
+        ("Gbm", "v", "E major"), ("Bbb", "bVII", "E major"), ("Ebdim", "iii°", "E major")]   # Fb major
+    assert tail(chord_palette("C#", fifths_steps=1)) == [
+        ("B#m", "vii", "Ab major"), ("D#", "II", "Ab major"), ("F##dim", "#iv°", "Ab major"),  # G# major
+        ("G#m", "v", "F# major"), ("B", "bVII", "F# major"), ("E#dim", "iii°", "F# major")]
+    # A minor's neighbours give F#dim Bm D (E minor) and Edim Gm Bb (D minor): v°, bvii, bII
+    assert tail(chord_palette("Ab", "natural minor", fifths_steps=1), 10) == [
+        ("Ebdim", "v°", "C# natural minor"), ("Gbm", "bvii", "C# natural minor"), ("Bbb", "bII", "C# natural minor")]
+    gb = chord_palette("Gb", fifths_steps=2)["chords"][16:]   # from Fb major: C's Cm Eb Adim from Bb major
+    assert [(c["symbol"], c["roman"], c["source"]) for c in gb] == [
+        ("Gbm", "i", "E major"), ("Bbb", "bIII", "E major"), ("Ebdim", "vi°", "E major")]
+
+
+def test_six_fifths_name_the_tritone_key_once():
+    """+6 and -6 fifths reach one scale (F# = Gb major from C): it is one source, under the +6 spelling."""
+    p = by_symbol(chord_palette("C", fifths_steps=6))
+    assert p["E#dim"]["sources"] == ["F# major"]
+    assert p["B"]["sources"] == ["E major", "B major", "F# major"]
+    assert not any("Gb major" in c["sources"] or c["source"] == "Gb major" for c in p.values())
+    # F#'s +6 key is B# major (label 'C major'), spelled as C's F# major is: the same tokens
+    assert chord_palette("F#", fifths_steps=6)["tokens"] == chord_palette("C", fifths_steps=6)["tokens"]
+    assert by_symbol(chord_palette("F#", fifths_steps=6))["A##dim"]["source"] == "C major"
+
+
+def test_extended_palette_keeps_only_chords_the_scale_spells():
+    """Letters + semitones: Ab B Eb is no Abm (Ab-B is an augmented 2nd) — a 7-note scale's chords are the
+    ones its own notes spell; the harmonic-minor triads are i ii° III+ iv V VI vii° (Kostka & Payne)."""
+    three = chord_palette("C", "harmonic minor", extended=True, max_notes=3)
+    assert three["symbols"] == ["Cm", "Csus4", "Csus2", "Ddim", "Ebaug", "Fm", "Fsus2", "G", "Gsus4", "Ab", "Bdim"]
+    four = by_symbol(chord_palette("C", "harmonic minor", extended=True))
+    assert not {"Abm", "Fdim", "Abdim", "Gaug", "Baug", "Ddim7"} & set(four)
+    assert four["Bdim7"]["notes"] == ["B", "D", "F", "Ab"] and four["Ebaug"]["roman"] == "bIII+"
+    hmaj = by_symbol(chord_palette("C", "harmonic major", extended=True))
+    assert not {"E", "Caug", "Eaug"} & set(hmaj) and hmaj["Abaug"]["notes"] == ["Ab", "C", "E"]
+    borrowed = by_symbol(chord_palette("C", borrow=True, extended=True, max_notes=3))
+    assert "E" not in borrowed and borrowed["Abaug"]["source"] == "C harmonic major"
+    # other scale sizes have no letter per degree: pitch classes decide, the chord spells itself
+    wt = chord_palette("C", "whole tone")
+    assert wt["symbols"] == ["Caug", "Daug", "Eaug", "F#aug", "G#aug", "Bbaug"]
+    assert [c["notes"] for c in wt["chords"]][1:3] == [["D", "F#", "A#"], ["E", "G#", "B#"]]
+    chromatic = by_symbol(chord_palette("C", "chromatic", extended=True, max_notes=3))
+    assert chromatic["E"]["notes"] == ["E", "G#", "B"] and len(chromatic) == 72   # 12 roots x 6 triad types
+
+
+def test_extended_palette_respects_max_notes_and_lists_only_table_chords():
+    """extended=true is every chord-table type with 3..max_notes notes: no unnamed stacked sets, whatever
+    `sevenths` (which only moves the core flag)."""
+    p = chord_palette("C", "hungarian major", extended=True, sevenths=True, max_notes=3)
+    assert max(c["size"] for c in p["chords"]) == 3
+    assert all(c["chord_type"] != "unknown" for c in chord_palette("C", "double harmonic", extended=True)["chords"])
+    assert chord_palette("C", "hirajoshi", extended=True, sevenths=True, max_notes=3)["count"] == \
+        chord_palette("C", "hirajoshi", extended=True, max_notes=3)["count"]
+    for scale in SCALES:
+        for max_notes in range(3, 7):
+            counts = set()
+            for sevenths in (False, True):
+                p = chord_palette("C", scale, extended=True, sevenths=sevenths, max_notes=max_notes)
+                assert all(3 <= c["size"] <= max_notes for c in p["chords"]), (scale, sevenths, max_notes)
+                assert all(c["chord_type"] != "unknown" for c in p["chords"]), (scale, sevenths, max_notes)
+                counts.add(tuple(p["symbols"]))
+            assert len(counts) == 1, (scale, max_notes)
 
 
 def test_harmonic_minor_extended_has_the_leading_tone_chords():
@@ -243,12 +332,17 @@ def test_unnamed_stacked_chords_stay_note_lists():
     assert [(c["symbol"], c["roman"], c["degree"]) for c in odd] == [
         (["G", "B", "Db"], "V?", 5), (["B", "Db", "F"], "VII?", 7)]
     assert all(c["chord_type"] == "unknown" and c["family"] == "other" for c in odd)
-    # inversions named by diatonic_chords (hungarian major's D#/G, D#m/Bb) are listed on their root,
-    # with the notes spelled as the scale spells them (C D# E F# G A Bb)
+    # diatonic_chords names hungarian major's (C D# E F# G A Bb) G Bb D# as D#/G and Bb D# F# as
+    # D#m/Bb by pitch class, but by letters they are no such chords (D# major needs F## and A#):
+    # they stay the stacked note lists, on their own degree
     hm = chord_palette("C", "hungarian major")
-    assert hm["symbols"] == ["C", "D#", "D#m", "D#dim", "Edim", "F#dim", "Am"]
-    d = by_symbol(hm)["D#"]
-    assert d["roman"] == "#II" and d["degree"] == 2 and d["notes"] == ["D#", "G", "Bb"] and d["core"]
+    assert hm["symbols"] == ["C", "D#dim", "Edim", "F#dim", ["G", "Bb", "D#"], "Am", ["Bb", "D#", "F#"]]
+    assert hm["tokens"] == ["I", "#ii°", "iii°", "#iv°", "v?", "vi", "bVII?"]
+    g = hm["chords"][4]
+    assert g["chord_type"] == "unknown" and g["degree"] == 5 and g["root"] == "G" and g["core"]
+    assert g["family"] == "other"   # G-Bb-D#: a minor third and an augmented fifth
+    # the inversions whose scale spelling does spell the chord keep their name, in root position
+    assert chord_palette("C", "major pentatonic")["symbols"] == ["C", "Csus2", "Dsus2", "Gsus2", "Am"]
 
 
 def test_non_home_notes_are_key_spelled():
@@ -270,9 +364,10 @@ def test_roman_note_marks_the_dialect_gap_of_non_major_homes():
     assert roman_to_chords("iii", "C", "major")["symbols"] == ["Em"]
     assert "roman_note" not in p["Ab"] and "roman_note" not in p["D"]
     # in minor, ^6/^7 without an accidental follow the chord's third (music21 Minor67Default)
-    mm = by_symbol(chord_palette("A", "melodic minor", extended=True))
-    assert mm["G#aug"]["roman"] == "VII+" and "Gaug" in mm["G#aug"]["roman_note"]
+    mm = by_symbol(chord_palette("A", "melodic minor", extended=True, borrow=True))
+    assert mm["F#sus4"]["roman"] == "VIsus4" and "Fsus4" in mm["F#sus4"]["roman_note"]
     assert "roman_note" not in mm["F#m7b5"] and "roman_note" not in mm["G#dim"]
+    assert "G#aug" not in mm   # G# C E is Caug (bIII+) spelled wrong: a G# augmented triad needs B#
     am = by_symbol(chord_palette("A", "natural minor", extended=True, borrow=True))
     assert am["F#sus4"]["roman"] == "VIsus4" and "Fsus4" in am["F#sus4"]["roman_note"]
     assert am["F#sus4"]["source"] == "A mixolydian" and "roman_note" not in am["F#m"]
@@ -305,6 +400,8 @@ def test_in_key_entries_fit_and_counts_match_in_every_key(scale):
             for c in p["chords"]:
                 assert pcs(c["notes"]) <= home, (tonic, c["symbol"])
                 assert c["notes"][0] == c["root"] and 1 <= c["degree"] <= len(resolve_scale_type(scale).intervals)
+                # the notes spell the symbol: letters + semitones (Ab B Eb would be no Abm)
+                assert not misspelled_tones(c), (tonic, extended, c["symbol"], c["notes"])
             counts.add((extended, p["count"]))
     assert len(counts) == 2, counts   # one count per mode of the universe, whatever the tonic
 
@@ -317,12 +414,18 @@ def test_no_borrowed_entry_is_a_subset_of_the_home_scale(scale):
         heavy = [{"extended": True, "borrow": True, "fifths_steps": 1}] if tonic in ("C", "F#", "Db") else []
         for kwargs in configs + heavy:
             p = chord_palette(tonic, scale, **kwargs)
+            considered = borrowing_sources(tonic, scale, list(PARALLEL_MODES) if kwargs.get("borrow") else [],
+                                           kwargs.get("fifths_steps", 0), include_home=True)
+            spelled = {s["label"]: {n.pitch_class_name for n in scale_notes(s["scale"], s["tonic"])}
+                       for s in considered}
             for c in p["chords"]:
                 assert (pcs(c["notes"]) <= home) == c["in_key"], (tonic, kwargs, c["symbol"])
                 assert (c["distance"] == 0) == c["in_key"]
                 assert (c["non_home_notes"] == []) == c["in_key"]
-                # sources go by pitch set: Abaug's notes are also Caug's, which an earlier key may hold
-                assert c["source"] in c["sources"]
+                assert not misspelled_tones(c), (tonic, kwargs, c["symbol"], c["notes"])
+                # sources judge spelling: each one's own notes spell the chord, so the nearest is its source
+                assert c["sources"][0] == c["source"], (tonic, kwargs, c["symbol"], c["sources"])
+                assert all(set(c["notes"]) <= spelled[label] for label in c["sources"]), (tonic, c["symbol"])
                 assert (c["sources"][0] == p["key"]) == c["in_key"]
                 if tonic == "C":  # the one shared rule: palette sources are borrowed_sources' labels
                     assert c["sources"] == borrowed_sources(
@@ -334,26 +437,49 @@ def test_no_borrowed_entry_is_a_subset_of_the_home_scale(scale):
             assert [c["distance"] for c in borrowed] == sorted(c["distance"] for c in borrowed)
 
 
+def _letter_steps(note: str, root: str) -> int:
+    return (LETTERS.index(parse_note(note).letter) - LETTERS.index(parse_note(root).letter)) % 7
+
+
+def _assert_transposed(ref: dict, got: dict, tonic: str) -> None:
+    """`got` (in `tonic`) is `ref` (in C) moved by one spelled interval: tokens, notes, letters, sources."""
+    assert got["tokens"] == ref["tokens"], tonic
+    assert [c["distance"] for c in got["chords"]] == [c["distance"] for c in ref["chords"]]
+    assert [c["degree"] for c in got["chords"]] == [c["degree"] for c in ref["chords"]]
+    assert [c["family"] for c in got["chords"]] == [c["family"] for c in ref["chords"]]
+    for a, b in zip(ref["chords"], got["chords"], strict=True):
+        assert rel(b["notes"], tonic) == rel(a["notes"], "C"), (tonic, b["symbol"])
+        assert b["chord_type"] == a["chord_type"]
+        assert [s.split(" ", 1)[1] for s in b["sources"]] == [s.split(" ", 1)[1] for s in a["sources"]]
+        assert [rel([s.split(" ", 1)[0]], tonic) for s in b["sources"]] == \
+               [rel([s.split(" ", 1)[0]], "C") for s in a["sources"]], (tonic, b["symbol"])
+        assert ("roman_note" in a) == ("roman_note" in b)
+        # spelled: the root on the same letter above the tonic, every chord tone on its own letter above the root
+        assert _letter_steps(b["root"], tonic) == _letter_steps(a["root"], "C"), (tonic, b["symbol"])
+        assert [_letter_steps(n, b["root"]) for n in b["notes"]] == [_letter_steps(n, a["root"]) for n in a["notes"]]
+
+
 @pytest.mark.parametrize("scale", ["major", "natural minor"])
 @pytest.mark.parametrize("sevenths", [False, True])
 def test_borrowing_is_transposition_invariant(scale, sevenths):
     ref = chord_palette("C", scale, borrow=True, sevenths=sevenths)
     for tonic in TONICS:
-        got = chord_palette(tonic, scale, borrow=True, sevenths=sevenths)
-        assert got["tokens"] == ref["tokens"], tonic
-        assert [c["distance"] for c in got["chords"]] == [c["distance"] for c in ref["chords"]]
-        assert [c["degree"] for c in got["chords"]] == [c["degree"] for c in ref["chords"]]
-        assert [c["family"] for c in got["chords"]] == [c["family"] for c in ref["chords"]]
-        for a, b in zip(ref["chords"], got["chords"], strict=True):
-            assert rel(b["notes"], tonic) == rel(a["notes"], "C"), (tonic, b["symbol"])
-            assert b["chord_type"] == a["chord_type"]
-            assert [s.split(" ", 1)[1] for s in b["sources"]] == [s.split(" ", 1)[1] for s in a["sources"]]
-            assert ("roman_note" in a) == ("roman_note" in b)
-            # spelled: every chord tone is on its own letter above the root
-            letters = [(LETTERS.index(parse_note(n).letter) - LETTERS.index(parse_note(b["root"]).letter)) % 7
-                       for n in b["notes"]]
-            assert letters == [(LETTERS.index(parse_note(n).letter) - LETTERS.index(parse_note(a["root"]).letter)) % 7
-                               for n in a["notes"]]
+        _assert_transposed(ref, chord_palette(tonic, scale, borrow=True, sevenths=sevenths), tonic)
+
+
+@pytest.mark.parametrize("scale, tonics", [("major", TONICS + ["Cb"]),
+                                           ("natural minor", TONICS + ["G#", "D#", "A#"]),
+                                           ("harmonic minor", TONICS + ["G#"])])
+@pytest.mark.parametrize("steps", range(1, 7))
+def test_fifths_borrowing_is_transposition_invariant(scale, tonics, steps):
+    """Neighbour keys keep the home's letters (Cb major's Fb major, C# major's G# major), so every key reads
+    the numerals C does, up to six steps round the circle; the tritone key is one source everywhere."""
+    configs = [{"fifths_steps": steps}] + ([{"fifths_steps": steps, "borrow": True, "sevenths": True}]
+                                           if steps in (2, 6) else [])
+    for kwargs in configs:
+        ref = chord_palette("C", scale, **kwargs)
+        for tonic in tonics:
+            _assert_transposed(ref, chord_palette(tonic, scale, **kwargs), tonic)
 
 
 def _assert_round_trip(p: dict, tonic: str, scale: str) -> None:

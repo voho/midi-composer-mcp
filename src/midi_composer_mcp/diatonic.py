@@ -95,23 +95,70 @@ def _mode_offset(scale: ScaleType) -> int:
     return sum(i - m for i, m in zip(scale.intervals, MAJOR_DEGREES))
 
 
-def _as_pitch_classes(notes) -> set[int]:
-    """Pitch classes of notes given as Note objects, note names or integers 0-11."""
+def _as_spelled(notes) -> tuple[set[int], set[str]]:
+    """(pitch classes, spelled names) of notes given as Note objects, note names or integers 0-11.
+
+    A Note or a name contributes its pitch class and its spelling ('G#', never
+    'Ab' for it); a bare integer carries no spelling, so it adds a pitch class only.
+    """
     if isinstance(notes, (str, Note)):
         notes = [notes]
     if not isinstance(notes, (list, tuple, set, frozenset)):
         raise ValueError(f"Expected a list of notes or pitch classes, got {type(notes).__name__}")
     pcs: set[int] = set()
+    names: set[str] = set()
     for n in notes:
-        if isinstance(n, Note):
-            pcs.add(n.pitch_class)
-        elif isinstance(n, int) and not isinstance(n, bool):
+        if isinstance(n, int) and not isinstance(n, bool):
             pcs.add(n % 12)
-        elif isinstance(n, str):
-            pcs.add(parse_note(n).pitch_class)
-        else:
+            continue
+        if isinstance(n, str):
+            n = parse_note(n)
+        if not isinstance(n, Note):
             raise ValueError(f"Not a note or pitch class: {n!r}")
-    return pcs
+        pcs.add(n.pitch_class)
+        names.add(n.pitch_class_name)
+    return pcs, names
+
+
+def _lettered(degrees: list[Note]) -> bool:
+    """True for a 7-note scale spelled one note per letter, where letters decide membership.
+
+    In such a scale a note belongs only on its own letter (C harmonic minor has B,
+    not Cb), so chords and borrowing are judged by letters + semitones. Scales of
+    other sizes (pentatonic, whole tone, octatonic, chromatic) have no such
+    structure — their spelling is a convention — and are judged by pitch class.
+    """
+    return len(degrees) == 7 and len({n.letter for n in degrees}) == 7
+
+
+def _on_own_letters(scale: ScaleType, tonic: Note) -> bool:
+    """True when scale_notes spells every degree of `scale` on its label's letter from `tonic`.
+
+    False only when a degree would need more than a double accidental and
+    transpose fell back to a table spelling (G## harmonic minor's F###).
+    """
+    start = LETTERS.index(tonic.letter)
+    return all(n.letter == LETTERS[(start + int(label.lstrip("#b")) - 1) % 7]
+               for n, label in zip(scale_notes(scale, tonic), degree_labels(scale)))
+
+
+def _source_spelling(source: dict) -> frozenset[str] | None:
+    """The spelled note names of a borrowing source, or None when it is judged by pitch class."""
+    degrees = scale_notes(source["scale"], source["tonic"])[:-1]
+    return frozenset(n.pitch_class_name for n in degrees) if _lettered(degrees) else None
+
+
+def _holding_sources(pcs: set[int] | frozenset[int], names: set[str], sources: list[dict],
+                     spellings: list[frozenset[str] | None]) -> list[str]:
+    """Labels of the sources holding every note, sorted by (distance, source order).
+
+    A spelled note must be one of a lettered source's own notes (G# is not C
+    natural minor's Ab); pitch classes decide for unspelled input and for
+    sources that are not lettered 7-note scales.
+    """
+    hits = [(s["distance"], i, s["label"]) for i, (s, spelled) in enumerate(zip(sources, spellings))
+            if pcs <= s["pcs"] and (spelled is None or names <= spelled)]
+    return [label for _, _, label in sorted(hits)]
 
 
 def borrowing_sources(tonic: str | Note, scale_type: str = "major", modes=None,
@@ -125,7 +172,15 @@ def borrowing_sources(tonic: str | Note, scale_type: str = "major", modes=None,
     `fifths_steps` n (0-6), the same mode on the keys 1..n steps round the
     circle of fifths, in the order +1, -1, +2, -2 ... (C major: G major, F major,
     D major, Bb major ...). A key's tonic is the home tonic moved 7k semitones
-    onto the fifth letter, respelled to a practical signature (circle._practical).
+    onto the fifth letter and keeps that spelling, so its chords agree with the
+    home key's letters and read the same numerals in every key (Cb major's
+    neighbour a fifth down is Fb major: its v is Gbm, not F#m). Only the label
+    names a theoretical key by its practical enharmonic (circle._practical):
+    'E major' for Fb major. (A key that would need more than double
+    accidentals — five or six steps out from a home at the edge of the circle,
+    e.g. A# harmonic minor's G## harmonic minor — is spelled practically.)
+    Six steps both ways reach one scale (F# and Gb major from C): it is listed
+    once, under the +6 spelling.
 
     Each source is {label ('C dorian', 'G major'), tonic (Note), scale (ScaleType),
     distance, pcs}. `distance` is how many of the source's pitch classes lie
@@ -160,35 +215,45 @@ def borrowing_sources(tonic: str | Note, scale_type: str = "major", modes=None,
         pcs = _scale_pcs(scale, home_tonic.pitch_class)
         sources.append({"label": f"{home_tonic.pitch_class_name} {scale.name}", "tonic": home_tonic,
                         "scale": scale, "distance": len(pcs - home_pcs), "pcs": pcs})
+    home_letter = LETTERS.index(home_tonic.letter)
     for step in range(1, fifths_steps + 1):
         for k in (step, -step):
-            key_tonic = transpose(home_tonic, 7 * k, 4 * k)
-            key_tonic = _practical(key_tonic, _mode_offset(home)).without_octave()
-            label = f"{key_tonic.pitch_class_name} {home.name}"
-            if any(s["label"] == label for s in sources):
-                continue  # six steps both ways can land on one spelling (F# +-6 -> C)
-            sources.append({"label": label, "tonic": key_tonic, "scale": home, "distance": abs(k),
-                            "pcs": _scale_pcs(home, key_tonic.pitch_class)})
+            key_tonic = transpose(home_tonic, 7 * k, 4 * k).without_octave()
+            practical = _practical(key_tonic, _mode_offset(home)).without_octave()
+            if key_tonic.letter != LETTERS[(home_letter + 4 * k) % 7] or not _on_own_letters(home, key_tonic):
+                key_tonic = practical  # beyond double accidentals: the practical enharmonic key
+            pcs = _scale_pcs(home, key_tonic.pitch_class)
+            if any(s["scale"].name == home.name and s["pcs"] == pcs for s in sources):
+                continue  # +-6 is one scale (F# / Gb major from C): keep the +6 spelling, added first
+            sources.append({"label": f"{practical.pitch_class_name} {home.name}", "tonic": key_tonic,
+                            "scale": home, "distance": abs(k), "pcs": pcs})
     return sources
 
 
 def borrowed_sources(notes, tonic: str | Note, scale_type: str = "major", modes=None,
                      fifths_steps: int = 0, include_home: bool = False) -> list[str]:
-    """Label every borrowing source whose pitch set holds all of `notes` ('C natural minor', ...).
+    """Label every borrowing source whose scale holds all of `notes` ('C natural minor', ...).
 
     `notes` are the chord tones plus the bass (Note objects, names or pitch
     classes 0-11). The candidates are borrowing_sources(tonic, scale_type,
     modes, fifths_steps) — by default the ten PARALLEL_MODES on the same tonic,
     home mode omitted — and the result is sorted by (distance from the home
-    scale, source order). The one rule shared by roman_to_chords' borrowed_from,
-    analyze_progression's borrowed_from and chord_palette's sources, so they
-    never disagree. e.g. Fm (F Ab C) in C major -> ['C harmonic major',
-    'C harmonic minor', 'C natural minor', 'C phrygian', 'C locrian'].
+    scale, source order). A source holds a chord when every tone is one of its
+    own notes, judged by letters + semitones: a borrowed chord is built from the
+    parallel mode's own spelled degrees (Aldwell & Schachter, Kostka & Payne), so
+    G# B D# is no chord of C harmonic minor (which has Ab), E G# B none of C
+    harmonic major (Ab) and G B D# none of C melodic minor — they come back
+    empty, and roman_to_chords calls them 'chromatic'. Pitch classes alone decide
+    for bare integers (no spelling to judge) and for a source that is not a
+    7-note scale on seven letters. The one rule shared by roman_to_chords'
+    borrowed_from, analyze_progression's borrowed_from and chord_palette's
+    sources, so they never disagree. e.g. Fm (F Ab C) in C major -> ['C
+    harmonic major', 'C harmonic minor', 'C natural minor', 'C phrygian', 'C
+    locrian'].
     """
-    pcs = _as_pitch_classes(notes)
+    pcs, names = _as_spelled(notes)
     sources = borrowing_sources(tonic, scale_type, modes, fifths_steps, include_home)
-    hits = [(s["distance"], i, s["label"]) for i, s in enumerate(sources) if pcs <= s["pcs"]]
-    return [label for _, _, label in sorted(hits)]
+    return _holding_sources(pcs, names, sources, [_source_spelling(s) for s in sources])
 
 
 def _roman_numeral(index: int, intervals: tuple[int, ...], quality: ChordType | None,
@@ -508,30 +573,59 @@ def _palette_universe(tonic: Note, scale: ScaleType, extended: bool, sevenths: b
                       sizes: frozenset[int]) -> list[dict]:
     """U(tonic, scale): the raw palette members of one source scale, in scale order.
 
-    Each member is {root, ctype (None for an unnamed stacked chord), notes (spelled as
-    the scale spells them, root first), degree, core, stacked_roman}. `stacked_roman`
-    is diatonic_chords' own numeral when it wrote this chord on its root (else None).
+    Each member is {root, ctype (None for an unnamed stacked chord), notes (root
+    first), degree, core, stacked_roman}. `stacked_roman` is diatonic_chords' own
+    numeral when it wrote this chord on its root (else None).
+
+    Chords are judged by letters + semitones. In a 7-note scale on seven letters
+    a table chord belongs to the scale only when the scale's own notes spell it,
+    each tone on its degree's letter above the root; the notes are then the
+    scale's. So C harmonic minor (C D Eb F G Ab B) has Ebaug (Eb G B) but no Abm
+    (Ab B Eb is an augmented second, not a minor third: Abm needs Cb) and no
+    Gaug (needs D#). Scales of other sizes have no letter per degree, so pitch
+    classes decide and a chord whose tones the scale's conventional spelling
+    puts on other letters is spelled from its own root (whole tone's D F# A#,
+    not D F# Bb). Unnamed stacked sets (no table chord, or in a 7-note scale
+    none the scale's letters spell: hungarian major's G Bb D# is no D#/G,
+    which needs F## and A#) are members only with extended=false.
     """
     degrees = scale_notes(scale, tonic)[:-1]
     spelled = {n.pitch_class: n for n in degrees}
     position = {n.pitch_class: i + 1 for i, n in enumerate(degrees)}
+    lettered = _lettered(degrees)
+
+    def chord_tones(root: Note, ctype: ChordType) -> list[Note] | None:
+        start = LETTERS.index(root.letter)
+        tones = []
+        for label, semis in ctype.degrees:
+            letter = LETTERS[(start + int(label.lstrip("#b")) - 1) % 7]
+            note = spelled[(root.pitch_class + semis) % 12]
+            if note.letter != letter:
+                if lettered:
+                    return None  # the scale's letters do not spell this chord
+                own = transpose(root, semis, int(label.lstrip("#b")) - 1)
+                note = own if own.letter == letter else note  # past double accidentals: keep the scale's
+            tones.append(note)
+        return tones
+
     members: list[dict] = []
     core: dict[tuple[int, str], str | None] = {}
     for c in diatonic_chords(tonic.name, scale.name, sevenths)["chords"]:
-        if not isinstance(c["symbol"], str):  # no table chord: keep the stacked notes as they are
-            members.append({"root": parse_note(c["root"]), "ctype": None,
-                            "notes": [parse_note(n) for n in c["notes"]],
-                            "degree": c["degree"], "core": True, "stacked_roman": c.get("roman")})
+        ctype = CHORDS[c["chord_type"]] if isinstance(c["symbol"], str) else None
+        root = spelled[parse_note(c["root"]).pitch_class] if ctype else None
+        notes = chord_tones(root, ctype) if ctype else None
+        if notes is None:  # no table chord the scale spells: keep the stacked notes as they are
+            if not extended:
+                members.append({"root": parse_note(c.get("bass", c["root"])), "ctype": None,
+                                "notes": [parse_note(n) for n in c["notes"]],
+                                "degree": c["degree"], "core": True, "stacked_roman": c.get("roman")})
             continue
-        ctype = CHORDS[c["chord_type"]]
-        root = spelled[parse_note(c["root"]).pitch_class]
         key = (root.pitch_class, ctype.name)
         # an inversion (C major pentatonic's C E A = Am/C) is listed in root position, on its root;
         # only a chord stacked on its own root keeps diatonic_chords' numeral
         core[key] = core.get(key) or (c.get("roman") if "bass" not in c else None)
         if not extended:
-            members.append({"root": root, "ctype": ctype,
-                            "notes": [spelled[(root.pitch_class + s) % 12] for s in ctype.intervals],
+            members.append({"root": root, "ctype": ctype, "notes": notes,
                             "degree": position[root.pitch_class], "core": True,
                             "stacked_roman": core[key]})
     if extended:
@@ -539,11 +633,13 @@ def _palette_universe(tonic: Note, scale: ScaleType, extended: bool, sevenths: b
             for ctype in CHORDS.values():
                 if len(ctype.intervals) not in sizes:
                     continue
-                pcs = [(root.pitch_class + s) % 12 for s in ctype.intervals]
-                if not all(pc in spelled for pc in pcs):
+                if not all((root.pitch_class + s) % 12 in spelled for s in ctype.intervals):
+                    continue
+                notes = chord_tones(root, ctype)
+                if notes is None:
                     continue
                 key = (root.pitch_class, ctype.name)
-                members.append({"root": root, "ctype": ctype, "notes": [spelled[pc] for pc in pcs],
+                members.append({"root": root, "ctype": ctype, "notes": notes,
                                 "degree": position[root.pitch_class], "core": key in core,
                                 "stacked_roman": core.get(key)})
     return members
@@ -563,15 +659,25 @@ def chord_palette(root: str, scale_type: str = "major", extended: bool = False, 
       stays a note list. With extended=true every chord type of the chord table
       with 3..max_notes notes (max_notes 3-6; the 2-note power chord only with
       include_dyads), rooted on every scale note, kept iff its pitch classes all
-      lie in the scale. Notes are spelled as the scale spells them.
+      lie in the scale — and only table chords: no unnamed stacked sets.
+      Judged by letters + semitones: in a 7-note scale a chord counts only when
+      the scale's own notes spell it (each tone on its degree's letter above
+      the root), so C harmonic minor has Ebaug (Eb G B) but neither Abm (Ab B Eb
+      is no minor triad: it needs Cb) nor Gaug (needs D#), and hungarian
+      major's stacked G Bb D# stays a note list (D#/G needs F## and A#); its
+      notes are the scale's. Other scale sizes have no letter per degree, so
+      pitch classes decide and a chord the scale's conventional spelling does
+      not spell is spelled from its own root (whole tone's Daug = D F# A#).
     - IN-KEY entries = U(root, scale_type). Any scale works (pentatonic, symmetric...).
     - BORROWED entries come from `source_modes` (a name or list) if given, else
       with borrow=true from PARALLEL_MODES minus the home mode, plus with
       `fifths_steps` n (0-6) the same mode on the keys 1..n steps round the
-      circle (+1, -1, +2, -2 ...) — the sources of borrowing_sources. From each
-      source S the U(S) chords with at least one tone outside the home scale
-      are kept (so chords the home key already has are dropped). Borrowing
-      needs a 7-note home, and every source mode must be a 7-note scale.
+      circle (+1, -1, +2, -2 ...) — the sources of borrowing_sources, a
+      neighbour key spelled on the home's letters (from Cb major, Fb major:
+      Gbm 'v', not F#m) and the tritone key listed once. From each source S
+      the U(S) chords with at least one tone outside the home scale are kept
+      (so chords the home key already has are dropped). Borrowing needs a
+      7-note home, and every source mode must be a 7-note scale.
 
     Entry fields: symbol, root, notes, chord_type, size, degree (of the root in
     its source scale), family ('major' | 'minor' | 'other' — Klimper's green /
@@ -590,8 +696,9 @@ def chord_palette(root: str, scale_type: str = "major", extended: bool = False, 
     outside the home scale, |k| for a key k steps away), non_home_notes,
     same_notes_as (earlier palette symbols with the identical pitch-class set:
     C6 ~ Am7, Csus2 ~ Gsus4) and sources (every considered source, the home
-    included, whose scale holds the chord — borrowed_sources, sorted by distance
-    then source order; Scaler's 'shared scales').
+    included, whose own notes spell the chord — borrowed_sources' rule, sorted
+    by distance then source order, so sources[0] is `source`; Scaler's 'shared
+    scales').
 
     Order ('sorted by complexity'): in-key first by (size, degree, harmonize_melody's
     type preference, chord-table order), then borrowed by (distance, source
@@ -654,6 +761,7 @@ def chord_palette(root: str, scale_type: str = "major", extended: bool = False, 
 
     sizes = frozenset(range(3, max_notes + 1)) | (frozenset({2}) if include_dyads else frozenset())
     sources = borrowing_sources(tonic, home.name, modes, fifths_steps, include_home=True)
+    spellings = [_source_spelling(s) for s in sources]  # borrowed_sources' rule, computed once
     home_pcs = sources[0]["pcs"]
     table_order = {name: i for i, name in enumerate(CHORDS)}
 
@@ -681,7 +789,7 @@ def chord_palette(root: str, scale_type: str = "major", extended: bool = False, 
         croot, ctype, notes = m["root"], m["ctype"], m["notes"]
         dedup = (croot.pitch_class, ctype.name) if ctype else (croot.pitch_class, None, pcs)
         if dedup in seen:
-            continue  # the first entry's `sources` already lists every scale that holds it
+            continue  # the first entry's `sources` already lists every scale that spells it
         seen.add(dedup)
         src = sources[index]
         symbol = f"{croot.pitch_class_name}{ctype.symbol}" if ctype else [n.pitch_class_name for n in notes]
@@ -715,7 +823,7 @@ def chord_palette(root: str, scale_type: str = "major", extended: bool = False, 
                 outside.append(n.pitch_class_name)
         entry["non_home_notes"] = outside
         entry["same_notes_as"] = list(by_pcs.get(pcs, []))
-        entry["sources"] = borrowed_sources(notes, tonic, home.name, modes, fifths_steps, include_home=True)
+        entry["sources"] = _holding_sources(pcs, {n.pitch_class_name for n in notes}, sources, spellings)
         by_pcs.setdefault(pcs, []).append(symbol)
         borrowed_count += index != 0
         chords.append(entry)
