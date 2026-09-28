@@ -10,10 +10,13 @@ Chords can be comped: per-chord ``durations`` (variable harmonic rhythm), an
 O/o/. ``rhythm`` of strikes (with ``sustain``), and a guitar-style ``strum``.
 Every renderer and track can be swung: ``swing`` is the DAW/MPC swing ratio
 (0.5 straight, 2/3 triplet swing, at most 0.75) applied to pairs of
-``swing_unit``-beat steps on the absolute timeline — on-beats never move. A
-part that ends mid-pair reports its swung end, so a file always lasts exactly
-as long as reported. The defaults (no durations, no rhythm, no strum, swing
-0.5) write exactly the files these renderers always wrote.
+``swing_unit``-beat steps on the absolute timeline — on-beats never move. The
+song assembler knows the bar, so it anchors the pairs to every downbeat: in an
+odd meter with swung quarters the bar's unpaired last quarter stays straight
+and bar lines never move. A part that ends mid-pair reports its swung end, so a
+file always lasts exactly as long as reported. The defaults (no durations, no
+rhythm, no strum, swing 0.5) write exactly the files these renderers always
+wrote.
 """
 
 from __future__ import annotations
@@ -83,18 +86,30 @@ def _check_swing(ratio, unit, where: str = "") -> tuple[float, float]:
 
 # --------------------------------------------------------------------- swing
 
-def _swing_warp(t: float, ratio: float, unit: float) -> float:
+def _swing_warp(t: float, ratio: float, unit: float, bar: float | None = None) -> float:
     """Move one beat position onto the swung grid.
 
     The timeline is cut into windows of two `unit` steps, [2uk, 2uk + 2u). Inside a
     window, with x = t - 2uk: the on-step half is stretched (x' = 2r·x for x < u) and
     the off-step half squeezed (x' = 2ur + 2(1-r)(x-u)). Window edges never move —
     every beat for swung sixteenths/eighths, every other beat for swung quarters — so
-    on-beats, bar lines and whole-bar lengths stay put; ratio 0.5 is the identity.
+    on-beats stay put, and so does every bar line of a meter the windows tile (any
+    meter for sixteenths and eighths, an even one for quarters); ratio 0.5 is the
+    identity.
+
+    `bar` (beats per bar; the song assembler passes it) anchors the windows to each
+    downbeat when they do not tile the bar — swung quarters in 3/4, 5/4 or 7/4 — as
+    DAW/MPC swing counts its steps from the bar: every bar swings alike, and the
+    bar's leftover step, which has no partner, stays straight, so bar lines never move.
     """
     if ratio == 0.5:
         return t
     window = 2 * unit
+    if bar is not None and _whole_steps(bar, window) is None:
+        downbeat = math.floor(t / bar + _EPS) * bar   # a time on a bar line belongs to the new bar
+        x = t - downbeat
+        paired = math.floor(bar / window + _EPS) * window   # the bar's whole windows
+        return t if x >= paired else downbeat + _swing_warp(x, ratio, unit)
     k = math.floor(t / window + _EPS)
     x = max(0.0, t - window * k)
     if x < unit:
@@ -102,17 +117,18 @@ def _swing_warp(t: float, ratio: float, unit: float) -> float:
     return window * k + 2 * unit * ratio + 2 * (1 - ratio) * (x - unit)
 
 
-def _swing_events(events: list[dict], ratio: float, unit: float) -> list[dict]:
+def _swing_events(events: list[dict], ratio: float, unit: float,
+                  bar: float | None = None) -> list[dict]:
     """Warp every event's start and end (absolute beats) onto the swung grid."""
     if ratio == 0.5:
         return events
     swung = []
     for e in events:
-        start = _swing_warp(e["start"], ratio, unit)
+        start = _swing_warp(e["start"], ratio, unit, bar)
         if "program" in e:
             swung.append(dict(e, start=start))
             continue
-        end = _swing_warp(e["start"] + e["duration"], ratio, unit)
+        end = _swing_warp(e["start"] + e["duration"], ratio, unit, bar)
         swung.append(dict(e, start=start, duration=end - start))
     return swung
 
@@ -382,6 +398,22 @@ def _comp_strikes(pattern: str, bounds: list[float], step: float, sustain: bool,
     return [[tuple(s) for s in chord] for chord in strikes]
 
 
+def _strum_too_wide(where: str, strum: float, strike_len: float, voices: int) -> ValueError:
+    """The error for a strum whose last voice would start at or after its strike's end.
+
+    The suggested strum starts the last voice 3 ticks before the strike's end, so it
+    still fits at MIDI resolution under the strongest swing, which can halve an
+    off-beat strike.
+    """
+    room = (strike_len - 3 / TICKS_PER_BEAT) / max(1, voices - 1)
+    widest = max(0.0, math.floor(room * 10000) / 10000)
+    return ValueError(
+        f"{where}strum {strum:g} is too wide for a {strike_len:g}-beat strike of {voices} notes"
+        f" (the last note would start at or after the strike's end, at the MIDI resolution of"
+        f" {TICKS_PER_BEAT} ticks per beat); use a strum of at most {widest:g}"
+    )
+
+
 def _chord_events(parsed_chords: list[dict], beats_per_chord: float, octave: int,
                   arpeggiate: bool, velocity: int, start: float = 0.0,
                   durations=None, rhythm: str | None = None, step_beats: float = 0.5,
@@ -394,8 +426,12 @@ def _chord_events(parsed_chords: list[dict], beats_per_chord: float, octave: int
     `rhythm` a chord is one block strike (or an arpeggio); with one, every O/o
     strikes the whole voicing (see _comp_strikes). With `strum`, voice i of a strike
     enters i*strum beats late (counted from the lowest note for 'down', the highest
-    for 'up'; 'alternate' flips on odd grid steps, or odd chords without a rhythm),
-    and all voices end together.
+    for 'up'), and all voices end together. 'alternate' is the guitarist's pendulum:
+    down on even steps of the `step_beats` grid counted from beat 0 of the timeline
+    (`start` included, so a track entering on an off-beat opens with an upstroke;
+    a strike between grid steps takes the step it falls in), up on odd ones; without
+    a rhythm it flips on odd chords. Delayed voices carry their strike ("strike") so
+    _events_to_track can refuse one that rounds onto its strike's end tick.
     """
     _check_range(f"{where}strum", strum, 0, 0.25)
     if not isinstance(strum_direction, str) or strum_direction.strip().lower() not in STRUM_DIRECTIONS:
@@ -419,8 +455,11 @@ def _chord_events(parsed_chords: list[dict], beats_per_chord: float, octave: int
         total = sum(lengths)
     if rhythm is not None:
         strikes = _comp_strikes(parse_rhythm(rhythm), offsets + [total], step_beats, sustain, where)
+        # 'alternate' reads the absolute grid: the track's own steps plus the steps before it
+        first_step = math.floor(start / step_beats + 1e-6)
     else:  # one block strike per chord, on its chord index for 'alternate'
         strikes = [[(offsets[i], lengths[i], RHYTHM_WEAK, i)] for i in range(count)]
+        first_step = 0
 
     events: list[dict] = []
     resolved: list[dict] = []
@@ -440,22 +479,23 @@ def _chord_events(parsed_chords: list[dict], beats_per_chord: float, octave: int
                                "start": chord_start,
                                "duration": length, "velocity": velocity})
         else:
-            by_pitch = sorted(range(len(voiced)), key=lambda v: voiced[v].midi)
+            voices = len(voiced)
+            by_pitch = sorted(range(voices), key=lambda v: voiced[v].midi)
             for onset, strike_len, symbol, grid in strikes[i]:  # onset is track-relative
-                if strum and (len(voiced) - 1) * strum >= strike_len - _EPS:
-                    raise ValueError(
-                        f"{where}strum {strum:g} is too wide for a {strike_len:g}-beat strike of"
-                        f" {len(voiced)} notes (the last note would start at or after the strike's"
-                        f" end); use a strum below {strike_len / max(1, len(voiced) - 1):g}"
-                    )
-                down = direction == "down" or (direction == "alternate" and grid % 2 == 0)
+                if strum and (voices - 1) * strum >= strike_len - _EPS:
+                    raise _strum_too_wide(where, strum, strike_len, voices)
+                down = direction == "down" or (direction == "alternate" and (first_step + grid) % 2 == 0)
                 order = by_pitch if down else by_pitch[::-1]
                 delay = {v: rank * strum for rank, v in enumerate(order)}
                 vel = accent_velocity if symbol == RHYTHM_STRONG else velocity
+                strike = (where, strum, strike_len, voices)
                 for v, note in enumerate(voiced):
-                    events.append({"midi": note.midi, "label": note.name,
-                                   "start": start + onset + delay[v],
-                                   "duration": strike_len - delay[v], "velocity": vel})
+                    event = {"midi": note.midi, "label": note.name,
+                             "start": start + onset + delay[v],
+                             "duration": strike_len - delay[v], "velocity": vel}
+                    if delay[v]:
+                        event["strike"] = strike
+                    events.append(event)
         resolved.append({
             "symbol": chord["symbol"] or " ".join(n.pitch_class_name for n in voiced),
             "notes": [n.name for n in voiced],
@@ -519,7 +559,9 @@ def _events_to_track(events: list[dict], channel: int, program: int,
     A note event is {"midi", "start", "duration", "velocity"}; a program-change
     event is {"start", "program"} (used when a stitched song part changes
     instrument between sections). At one tick: note-offs, then program changes,
-    then note-ons.
+    then note-ons. A note that rounds to no length lasts one tick — except a
+    strummed voice (it carries its "strike"), which may not run past its strike's
+    end into the next chord: that strum is too wide at MIDI resolution, a ValueError.
     """
     timed: list[tuple[int, int, Message]] = []
     for e in events:
@@ -527,7 +569,11 @@ def _events_to_track(events: list[dict], channel: int, program: int,
         if "program" in e:
             timed.append((on_tick, 1, Message("program_change", program=e["program"], channel=channel)))
             continue
-        off_tick = max(on_tick + 1, round((e["start"] + e["duration"]) * TICKS_PER_BEAT))
+        off_tick = round((e["start"] + e["duration"]) * TICKS_PER_BEAT)
+        if off_tick <= on_tick:
+            if "strike" in e:   # checked here, on the final (placed and swung) ticks
+                raise _strum_too_wide(*e["strike"])
+            off_tick = on_tick + 1
         timed.append((on_tick, 2, Message("note_on", note=e["midi"], velocity=e["velocity"], channel=channel)))
         timed.append((off_tick, 0, Message("note_off", note=e["midi"], velocity=0, channel=channel)))
     timed.sort(key=lambda t: (t[0], t[1]))

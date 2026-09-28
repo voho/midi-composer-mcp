@@ -111,7 +111,10 @@ def render_song_structure(sections, form=None, tempo: int = 120, beats_per_bar: 
     several), so separate parts never merge. A name cannot be drums in one section
     and pitched in another. An explicit `channel` is honoured (drums always use
     channel 10). The file's time signature follows `beats_per_bar`. `swing` /
-    `swing_unit` (or a track's own) swing every section on the song's global grid.
+    `swing_unit` (or a track's own) swing every section on the song's bar grid:
+    pairs of steps count from each downbeat, so every section (and every repeat of
+    it) swings alike and bar lines never move — in an odd meter with swung quarters
+    (3/4, 5/4 at swing_unit 1.0) the bar's unpaired last quarter stays straight.
     """
     if not isinstance(sections, dict) or not sections:
         raise ValueError("sections must be a non-empty mapping of section name to {bars, tracks}")
@@ -200,7 +203,6 @@ def render_song_structure(sections, form=None, tempo: int = 120, beats_per_bar: 
     timeline = []
     offset = 0.0
     bar_cursor = 0
-    swung = False
     for occ, label in enumerate(order):
         sec = built_sections[label]
         for b in sec["built"]:
@@ -215,13 +217,12 @@ def render_song_structure(sections, form=None, tempo: int = 120, beats_per_bar: 
                     f" give them different names"
                 )
             elif not b["is_drums"] and b["program"] != name_program[tname]:
-                change = _swing_warp(b["start"] + offset, *b["swing"])
+                change = _swing_warp(b["start"] + offset, *b["swing"], bpb)
                 name_events[tname].append({"start": change, "program": b["program"]})
                 name_program[tname] = b["program"]
             shifted = [dict(e, start=e["start"] + offset) for e in b["events"]]
-            if b["swing"][0] != 0.5:
-                shifted = _swing_events(shifted, *b["swing"])  # on the song's absolute timeline
-                swung = True
+            # swung on the song's bar grid, which never moves a bar line
+            shifted = _swing_events(shifted, *b["swing"], bpb)
             name_events.setdefault(tname, []).extend(shifted)
         timeline.append({
             "index": occ,
@@ -263,12 +264,7 @@ def render_song_structure(sections, form=None, tempo: int = 120, beats_per_bar: 
             summary["program_changes"] = changes
         track_summary.append(summary)
 
-    total_beats = offset
-    if swung:
-        # swing never moves a bar line of an even meter; swung quarters in an odd meter can
-        # push the last note past the final bar line, and the file must still last as reported
-        total_beats = max([offset] + [e["start"] + e["duration"] for evs in name_events.values()
-                                      for e in evs if "program" not in e])
+    total_beats = offset   # swing on the bar grid ends every note by the final bar line
     mid = _build_file(parts, tempo, bpb, total_beats=total_beats)
     result = _write_file(mid, file_name, output_dir, "song")
     result.update(_common_meta(tempo, total_beats))

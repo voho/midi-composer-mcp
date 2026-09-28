@@ -9,7 +9,9 @@ on purpose, with ``python tests/test_rendering_ext.py --write-goldens``.
 
 from __future__ import annotations
 
+import math
 import os
+import re
 import sys
 
 import pytest
@@ -153,6 +155,9 @@ def test_spelled_out_defaults_are_byte_identical_too(name, tool, kwargs, tmp_pat
 
 
 # ------------------------------------------------------------------ helpers
+
+TONICS = ["C", "G", "D", "A", "E", "B", "F#", "C#", "F", "Bb", "Eb", "Ab", "Db", "Gb"]
+
 
 def _notes(path) -> list[tuple[float, float, int, int]]:
     """(on beat, off beat, MIDI note, velocity) for every note in the file, sorted."""
@@ -300,6 +305,125 @@ def test_alternate_strum_without_rhythm_uses_chord_parity():
     events, _, _ = _events(["C", "G", "C"], beats_per_chord=1, strum=0.02, strum_direction="alternate")
     firsts = {e["start"]: e["midi"] for e in events if e["start"] in (0.0, 1.0, 2.0)}
     assert firsts == {0.0: 60, 1.0: 74, 2.0: 60}
+    # wherever the track starts: the chord index, not the grid, sets the stroke
+    events, _, _ = _events(["C", "G", "C"], beats_per_chord=1, strum=0.02, strum_direction="alternate", start=0.5)
+    firsts = {e["start"]: e["midi"] for e in events if e["start"] in (0.5, 1.5, 2.5)}
+    assert firsts == {0.5: 60, 1.5: 74, 2.5: 60}
+
+
+def _strokes(result, grid: float) -> dict:
+    """{strike beat: 'down' | 'up'} of a strummed chords file: which end of the chord enters first."""
+    strikes = {}
+    for on, _off, midi, _vel in _notes(result["file"]):
+        strikes.setdefault(round(on / grid) * grid, []).append((on, midi))
+    return {beat: "down" if min(v)[1] == min(m for _, m in v) else "up" for beat, v in sorted(strikes.items())}
+
+
+def test_alternate_strum_follows_the_absolute_grid(tmp_path):
+    def strokes(rhythm, start_beat, grid=0.5):
+        r = server.arrange_to_midi([{"type": "chords", "chords": ["C"], "beats_per_chord": 2, "rhythm": rhythm,
+                                     "step_beats": 0.5, "strum": 0.05, "strum_direction": "alternate",
+                                     "start_beat": start_beat}], output_dir=str(tmp_path), file_name="a.mid")
+        return _strokes(r, grid)
+    # a track entering on the 'and' of 1 opens with an upstroke: down on the beats, up on the 'and's
+    assert strokes("oooo", 0.5) == {0.5: "up", 1.0: "down", 1.5: "up", 2.0: "down"}
+    # the same onsets written two ways strum the same way
+    assert strokes("ooo.", 0.5) == strokes(".ooo", 0) == {0.5: "up", 1.0: "down", 1.5: "up"}
+    # an even number of steps late: down on the beat again
+    assert strokes("oooo", 1.0) == {1.0: "down", 1.5: "up", 2.0: "down", 2.5: "up"}
+    # a start between grid steps takes the step it falls in, and the strokes still alternate
+    assert strokes("oooo", 0.25, grid=0.25) == {0.25: "down", 0.75: "up", 1.25: "down", 1.75: "up"}
+
+
+def test_alternate_strum_in_a_song_counts_from_the_section_start(tmp_path):
+    # sections start on bar lines, so a repeated section strums alike even when a bar holds an
+    # odd number of steps (quarter strums in 3/4)
+    comp = {"type": "chords", "name": "g", "chords": ["C"], "beats_per_chord": 3, "rhythm": "ooo",
+            "step_beats": 1, "strum": 0.05, "strum_direction": "alternate"}
+    song = render_song_structure({"A": {"bars": 1, "tracks": [comp]}}, form="A A", beats_per_bar=3,
+                                 output_dir=str(tmp_path), file_name="s.mid")
+    assert _strokes(song, 1.0) == {0.0: "down", 1.0: "up", 2.0: "down", 3.0: "down", 4.0: "up", 5.0: "down"}
+
+
+@pytest.mark.parametrize("sevenths", [False, True])
+@pytest.mark.parametrize("tonic", TONICS)
+def test_offset_comping_strums_on_the_absolute_grid_in_every_key(tonic, sevenths):
+    from midi_composer_mcp.diatonic import degrees_to_chords
+    kw = dict(beats_per_chord=2, rhythm="O..o..o.", step_beats=0.25, strum=0.03,
+              strum_direction="alternate", sustain=True)
+    symbols = degrees_to_chords(tonic, "major", [1, 6, 4, 5], sevenths)["symbols"]
+    timing, directions = _comping_shape(symbols, **kw)
+    late_timing, late = _comping_shape(symbols, start=0.25, **kw)
+    # one sixteenth late: the same part, but every strike now sits on an odd step of the grid
+    assert [(round(s, 6), round(e, 6), v) for s, e, v in late_timing] == \
+        [(round(s + 0.25, 6), round(e + 0.25, 6), v) for s, e, v in timing]
+    assert directions == ["down", "up", "down"] * 4 and late == ["up", "down", "up"] * 4
+    assert _comping_shape(symbols, start=0.5, **kw)[1] == directions   # two steps late: the same strokes
+
+
+# ------------------------------------------------------- strum at MIDI resolution
+
+def _voices_stay_in_their_chords(result, strikes_per_chord: int = 1) -> bool:
+    """Every voice of every chord starts inside that chord's span (to the tick), and the
+    file ends exactly where reported: no strummed voice runs over a chord change."""
+    ons = [round(on * 480) for on, *_ in _notes(result["file"])]
+    for c in result["chords"]:
+        lo = round(c["start_beat"] * 480)
+        hi = round((c["start_beat"] + c["duration_beats"]) * 480)
+        if sum(lo <= t < hi for t in ons) != len(c["midi"]) * strikes_per_chord:
+            return False
+    return _lasts_as_reported(result)
+
+
+def _widest(err) -> float:
+    """The strum a 'too wide' error suggests (from a ValueError or a pytest.raises result)."""
+    return float(re.search(r"use a strum of at most ([\d.]+)", str(getattr(err, "value", err))).group(1))
+
+
+def test_strum_at_the_width_limit_is_refused_at_midi_resolution(tmp_path):
+    out = str(tmp_path)
+    # 2 x 0.1249 < 0.25 beats, but the last voice rounds onto the chord change (tick 120)
+    with pytest.raises(ValueError, match="too wide") as err:
+        server.chords_to_midi(["C", "G"], beats_per_chord=0.25, strum=0.1249, output_dir=out)
+    r = server.chords_to_midi(["C", "G"], beats_per_chord=0.25, strum=_widest(err), output_dir=out,
+                              file_name="w.mid")
+    assert _voices_stay_in_their_chords(r)
+    # swing squeezes the off-beat strike: the check runs on the swung ticks
+    kw = dict(beats_per_chord=1, rhythm="oo", step_beats=0.5, swing=0.75)
+    with pytest.raises(ValueError, match="too wide") as err:
+        server.chords_to_midi(["C", "G"], strum=0.2495, output_dir=out, **kw)
+    r = server.chords_to_midi(["C", "G"], strum=_widest(err), output_dir=out, file_name="s.mid", **kw)
+    assert _voices_stay_in_their_chords(r, strikes_per_chord=2)
+    # and in a song, on the song's placed and swung timeline
+    with pytest.raises(ValueError, match="too wide"):
+        render_song_structure({"v": {"tracks": [dict(kw, type="chords", chords=["C", "G"], strum=0.2495)]}},
+                              beats_per_bar=3, swing=0.75, swing_unit=0.5, output_dir=out)
+
+
+@pytest.mark.parametrize("swing", [0.5, 2 / 3, 0.75])
+@pytest.mark.parametrize("sevenths", [False, True])
+@pytest.mark.parametrize("tonic", TONICS)
+def test_strums_near_the_limit_render_or_refuse_in_every_key(tonic, sevenths, swing, tmp_path):
+    from midi_composer_mcp.diatonic import degrees_to_chords
+    symbols = degrees_to_chords(tonic, "major", [1, 6, 4, 5], sevenths)["symbols"]
+    voices = 4 if sevenths else 3
+    limit = 0.5 / (voices - 1)      # two 0.5-beat strikes per chord; the off-beat one swings short
+    widest = None
+    for gap in (0, 1e-5, 1e-4, 5e-4, 1e-3, 2e-3, 3e-3, 5e-3, 1e-2, 3e-2):
+        strum = min(0.25, limit - gap)
+        try:
+            r = server.chords_to_midi(symbols, beats_per_chord=1, rhythm="oo", step_beats=0.5, strum=strum,
+                                      swing=swing, output_dir=str(tmp_path), file_name="n.mid")
+        except ValueError as err:
+            assert "too wide" in str(err)
+            widest = _widest(err)
+            assert strum > widest       # the suggested strum is never one that is refused
+            continue
+        assert _voices_stay_in_their_chords(r, strikes_per_chord=2), strum
+    assert widest is not None           # the gap-0 strum is always refused
+    r = server.chords_to_midi(symbols, beats_per_chord=1, rhythm="oo", step_beats=0.5, strum=widest,
+                              swing=swing, output_dir=str(tmp_path), file_name="w.mid")
+    assert _voices_stay_in_their_chords(r, strikes_per_chord=2)
 
 
 def test_tresillo_stab_example(tmp_path):
@@ -407,9 +531,10 @@ def test_offset_tracks_swing_on_the_absolute_timeline(tmp_path):
     assert [e["start_beat"] for e in r["tracks"][0]["events"]] == pytest.approx([2 / 3, 1.0])
 
 
-def test_song_sections_swing_on_the_global_grid(tmp_path):
+def test_song_sections_swing_on_the_song_bar_grid(tmp_path):
     out = str(tmp_path)
     # 4/4, a section starting at bar 3 (beat 8): the off-beat eighths of the verse are swung
+    # exactly as the same track placed at beat 8 of an arrangement (the windows tile the bar)
     verse = [{"type": "notes", "name": "lead", "notes": ["C4", "D4", "E4", "F4"]}]
     song = render_song_structure({"intro": {"bars": 2, "tracks": [{"type": "drums", "lanes": {"kick": "O"}}]},
                                   "verse": {"bars": 1, "tracks": verse}},
@@ -417,19 +542,23 @@ def test_song_sections_swing_on_the_global_grid(tmp_path):
     assert song["sections"][1]["start_bar"] == 2 and song["sections"][1]["start_beat"] == 8
     lead = [on for on, _, midi, _ in _notes(song["file"]) if midi in (60, 62, 64, 65)]
     assert lead == pytest.approx([8, 8 + 2 / 3, 9, 9 + 2 / 3], abs=1 / 480)
-    # 3/4 with swung quarters: the section at start_bar 3 (beat 9) sits mid-window, so a
-    # section-local grid would be wrong; it must match the same track placed at beat 9
+    arr = render_arrangement([dict(verse[0], start_beat=8)], swing=2 / 3, output_dir=out, file_name="v.mid")
+    assert [on for on, *_ in _notes(arr["file"])] == lead
+    # 3/4 with swung quarters: the pairs count from every downbeat, so the section at
+    # start_bar 3 (beat 9) swings exactly as it does at beat 0, and the bar's last quarter,
+    # which has no partner, stays straight (the bar line at 12 never moves)
     part = {"type": "notes", "name": "p", "notes": ["C4", "D4", "E4"], "step_beats": 1}
     song = render_song_structure({"a": {"bars": 3, "tracks": [{"type": "drums", "lanes": {"kick": "O"}}]},
                                   "b": {"bars": 1, "tracks": [part]}},
                                  form="a b", beats_per_bar=3, swing=0.75, swing_unit=1.0,
                                  output_dir=out, file_name="t.mid")
-    arr = render_arrangement([dict(part, start_beat=9)], swing=0.75, swing_unit=1.0,
-                             output_dir=out, file_name="u.mid")
+    alone = render_song_structure({"b": {"bars": 1, "tracks": [part]}}, beats_per_bar=3, swing=0.75,
+                                  swing_unit=1.0, output_dir=out, file_name="u.mid")
     in_song = [(on, off) for on, off, midi, _ in _notes(song["file"]) if midi != 36]
-    in_arr = [(on, off) for on, off, _, _ in _notes(arr["file"])]
-    assert in_song == in_arr == [(9.5, 10.0), (10.0, 11.5), (11.5, 12.0)]
-    assert _lasts_as_reported(song) and _lasts_as_reported(arr)
+    in_alone = [(on + 9, off + 9) for on, off, _, _ in _notes(alone["file"])]
+    assert in_song == in_alone == [(9.0, 10.5), (10.5, 11.0), (11.0, 12.0)]
+    assert song["total_beats"] == 12 and alone["total_beats"] == 3
+    assert _lasts_as_reported(song) and _lasts_as_reported(alone)
 
 
 def test_arrange_song_passes_chord_comping_fields_through(tmp_path):
@@ -461,7 +590,88 @@ def test_program_changes_follow_the_swung_grid(tmp_path):
             change_at = now
         if m.type == "note_on" and m.note == 62:
             d4_at = now
-    assert change_at == d4_at == round(3.5 * 480)
+    # at the section start: swing on the song's bar grid never moves a bar line
+    assert change_at == d4_at == 3 * 480 == round(song["sections"][1]["start_beat"] * 480)
+
+
+def test_odd_meter_swung_quarters_keep_every_bar_line(tmp_path):
+    out = str(tmp_path)
+    # 'A B A B' in 3/4 with swung quarters: a section, and its repeat, swings from its own
+    # downbeat (long-short, then the unpaired last quarter straight); no note crosses a bar line
+    song = server.arrange_song({
+        "A": {"bars": 1, "tracks": [{"type": "notes", "name": "m", "notes": "C4 E4 G4", "step_beats": 1}]},
+        "B": {"bars": 1, "tracks": [{"type": "notes", "name": "m", "notes": "D4 F4 A4", "step_beats": 1,
+                                     "program": 40}]},
+    }, form="A B A B", beats_per_bar=3, swing=0.75, swing_unit=1.0, output_dir=out, file_name="o.mid")
+    assert [s["start_beat"] for s in song["sections"]] == [0, 3, 6, 9]
+    a = [(0.0, 1.5, 60), (1.5, 2.0, 64), (2.0, 3.0, 67)]
+    b = [(3.0, 4.5, 62), (4.5, 5.0, 65), (5.0, 6.0, 69)]
+    assert [n[:3] for n in _notes(song["file"])] == a + b + [(on + 6, off + 6, m) for on, off, m in a + b]
+    now, changes = 0, []
+    for m in mido.MidiFile(song["file"]).tracks[1]:
+        now += m.time
+        if m.type == "program_change":
+            changes.append((now, m.program))
+    assert changes == [(0, 0), (3 * 480, 40), (6 * 480, 0), (9 * 480, 40)]   # on the section starts
+    assert song["total_beats"] == 12 and _lasts_as_reported(song)
+    # one 2-bar section at triplet swing: bar 2 plays as bar 1, from its own downbeat at 3
+    two = server.arrange_song({"A": {"bars": 2, "tracks": [
+        {"type": "notes", "notes": "C4 E4 G4 C5 G4 E4", "step_beats": 1}]}},
+        beats_per_bar=3, swing=2 / 3, swing_unit=1.0, output_dir=out, file_name="t.mid")
+    assert [on for on, *_ in _notes(two["file"])] == pytest.approx([0, 4 / 3, 2, 3, 3 + 4 / 3, 5], abs=1 / 480)
+    assert two["total_beats"] == 6 and _lasts_as_reported(two)
+    one = server.arrange_song({"A": {"bars": 1, "tracks": [
+        {"type": "notes", "notes": "C4 E4 G4", "step_beats": 1}]}},
+        beats_per_bar=3, swing=0.75, swing_unit=1.0, output_dir=out, file_name="one.mid")
+    assert one["total_beats"] == 3 and one["total_bars"] == 1 and _lasts_as_reported(one)
+
+
+@pytest.mark.parametrize("bar", range(1, 8))
+@pytest.mark.parametrize("unit", [0.25, 0.5, 1.0])
+@pytest.mark.parametrize("ratio", [0.55, 2 / 3, 0.75])
+def test_bar_anchored_swing_warp(bar, unit, ratio):
+    ts = [i / 48 for i in range(48 * 3 * bar + 1)]
+    warped = [_swing_warp(t, ratio, unit, bar) for t in ts]
+    assert warped == sorted(warped) and len(set(warped)) == len(warped)          # strictly monotone
+    assert [_swing_warp(k * bar, ratio, unit, bar) for k in range(4)] == [0, bar, 2 * bar, 3 * bar]
+    for t, w in zip(ts, warped):                                                 # every bar alike
+        downbeat = bar * math.floor(t / bar + 1e-9)
+        assert w - downbeat == pytest.approx(_swing_warp(t - downbeat, ratio, unit, bar), abs=1e-9)
+    if (bar / (2 * unit)).is_integer():   # the windows tile the bar: exactly the absolute grid
+        assert warped == [_swing_warp(t, ratio, unit) for t in ts]
+    else:                                 # swung quarters in an odd meter: the last quarter is straight
+        for t, w in zip(ts, warped):
+            if t % bar >= bar - 1:
+                assert w == t
+        assert _swing_warp(1.0, ratio, unit, bar) == (2 * ratio if bar > 1 else 1.0)
+
+
+@pytest.mark.parametrize("bpb", range(1, 8))
+@pytest.mark.parametrize("unit", [0.25, 0.5, 1.0])
+@pytest.mark.parametrize("ratio", [2 / 3, 0.75])
+def test_song_swing_repeats_sections_alike_and_never_moves_a_bar_line(bpb, unit, ratio, tmp_path):
+    # every step of a 2-bar section filled, in any meter, played three times ('A A A')
+    per_bar = int(bpb / unit)
+    section = {"bars": 2, "tracks": [
+        {"type": "notes", "name": "n", "notes": ["C4", "D4", "E4"], "rhythm": "o" * (2 * per_bar),
+         "step_beats": unit},
+        {"type": "chords", "name": "c", "chords": ["C", "G"], "beats_per_chord": bpb, "rhythm": "o" * per_bar,
+         "step_beats": unit, "strum": 0.01, "strum_direction": "alternate"},
+        {"type": "drums", "name": "d", "lanes": {"hat": "o" * (2 * per_bar)}, "step_beats": unit},
+    ]}
+    song = render_song_structure({"A": section}, form="A A A", beats_per_bar=bpb, swing=ratio, swing_unit=unit,
+                                 output_dir=str(tmp_path), file_name="s.mid")
+    assert song["total_beats"] == 6 * bpb and _lasts_as_reported(song)
+    tick_bar = bpb * 480
+    notes = [(round(on * 480), round(off * 480), midi) for on, off, midi, _ in _notes(song["file"])]
+    passes = [sorted((on - p * 2 * tick_bar, off - p * 2 * tick_bar, m) for on, off, m in notes
+                     if p * 2 * tick_bar <= on < (p + 1) * 2 * tick_bar) for p in range(3)]
+    assert passes[0] == passes[1] == passes[2] and len(passes[0]) * 3 == len(notes)
+    bars = [sorted((on - k * tick_bar, off - k * tick_bar) for on, off, _ in notes
+                   if k * tick_bar <= on < (k + 1) * tick_bar) for k in range(6)]
+    assert all(b == bars[0] for b in bars)                   # every bar swings alike
+    assert all(0 <= on < off <= tick_bar for on, off in bars[0])   # and no note crosses a bar line
+    assert min(on for on, _ in bars[0]) == 0                 # the downbeat is on the bar line
 
 
 # ---------------------------------------------------- rendering contracts
@@ -494,9 +704,6 @@ def test_swung_and_strummed_files_last_as_long_as_reported(ratio, unit, tmp_path
              "strum": 0.02}]}}, form="v v v", beats_per_bar=bpb, swing=ratio, swing_unit=unit,
             output_dir=out, file_name="s.mid")
         assert _lasts_as_reported(r), bpb
-
-
-TONICS = ["C", "G", "D", "A", "E", "B", "F#", "C#", "F", "Bb", "Eb", "Ab", "Db", "Gb"]
 
 
 def _comping_shape(chords, **kw) -> tuple[list, list]:
